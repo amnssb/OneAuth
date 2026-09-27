@@ -17,6 +17,12 @@ import (
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 var codeRegex = regexp.MustCompile("^[2-9A-HJ-NP-Z]{6}$")
+
+// Unanchored twin of codeRegex: an admin often says "验证码：XXXXXX" or sends
+// the code after a mention, so the code is searched for rather than required
+// to be the whole message. It still has to exist in the code index to count,
+// which is where the real check happens.
+var codeSearchRegex = regexp.MustCompile(`[2-9A-HJ-NP-Z]{6}`)
 var cqRegex = regexp.MustCompile(`\[CQ:[^\]]+\]`)
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +77,15 @@ func processEvent(raw []byte) {
 		return
 	}
 
+	// NapCat reports messages sent by the bot's own account (how a group
+	// admin relays a code) as post_type "message_sent" rather than "message";
+	// they are group messages all the same and must reach the matcher below.
+	selfSent := false
+	if postType, ok := event["post_type"].(string); ok && postType == "message_sent" {
+		selfSent = true
+		event["post_type"] = "message"
+	}
+
 	targetGroupID := database.GetSetting("target_group_id", "")
 	if targetGroupID == "" {
 		return
@@ -113,7 +128,11 @@ func processEvent(raw []byte) {
 	}
 
 	text = strings.ToUpper(strings.TrimSpace(text))
-	log.Printf("[OneBot] Received target group message: '%s' from user: '%s'", text, userID)
+	origin := "member"
+	if selfSent {
+		origin = "self/admin"
+	}
+	log.Printf("[OneBot] Received target group message: '%s' from user: '%s' (%s)", text, userID, origin)
 	if codeRegex.MatchString(text) {
 		sess, ok := session.DefaultManager.VerifyCode(text, userID)
 		if ok {
@@ -121,9 +140,19 @@ func processEvent(raw []byte) {
 		} else {
 			log.Printf("[OneBot] ✗ 验证码匹配未成功: code='%s' not found or expired", text)
 		}
-	} else {
-		log.Printf("[OneBot] ✗ 消息未命中验证码格式正则: '%s'", text)
+		return
 	}
+	// Not a bare code: look for one inside the sentence. Longest match first
+	// so a message that quotes two codes consumes the last one actually sent.
+	if match := codeSearchRegex.FindAllString(text, -1); len(match) > 0 {
+		candidate := match[len(match)-1]
+		log.Printf("[OneBot] Extracted candidate code '%s' from '%s'", candidate, text)
+		if sess, ok := session.DefaultManager.VerifyCode(candidate, userID); ok {
+			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → QQ: %s | Session: %s\n", candidate, userID, sess.SessionID)
+			return
+		}
+	}
+	log.Printf("[OneBot] ✗ 消息未命中验证码格式正则: '%s'", text)
 }
 
 func extractTextV11(event map[string]interface{}) string {
