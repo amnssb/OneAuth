@@ -488,3 +488,17 @@ auto_login = false
 
 ### Q3: 业务系统报错“Token 校验失败”？
 - 确认业务系统服务器能够正常访问 OneAuth 的 `/.well-known/jwks.json` 端点以获取公钥，并确保系统时间与标准 NTP 时间保持同步。
+
+### Q4: `docker compose up` 拉取镜像报 `failed size validation: xxx != yyy: failed precondition`？
+- **原因**: Docker Hub 镜像加速器（`/etc/docker/daemon.json` 里的 `registry-mirrors`）返回了错误的 manifest —— 多数是加速器已失效或缓存损坏，错误页被当成了 manifest。国内服务器极为常见。
+- **解决**:
+  1. 先单独重试确认非偶发：`docker pull mlikiowa/napcat-docker:latest`
+  2. 检查 `cat /etc/docker/daemon.json`，把失效的加速器换成可用的（社区公共加速器时效性强，选当前可用的即可），然后：
+     `systemctl daemon-reload && systemctl restart docker`
+  3. 不想改全局配置时，可直接经任意可用加速站拉取并改标签，compose 即使用本地镜像不再拉取：
+     ```bash
+     docker pull <可用加速站>/mlikiowa/napcat-docker:latest
+     docker tag  <可用加速站>/mlikiowa/napcat-docker:latest mlikiowa/napcat-docker:latest
+     ```
+  4. 构建阶段的基础镜像（`golang:1.22-alpine` / `alpine:3.20`）走同一个加速器配置，修复后一并生效。
+
