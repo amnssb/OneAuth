@@ -4,25 +4,79 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.SiteName}} - 验证码登录</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
     <style>
+        /* Design tokens copied from ObsidianArc's web/src/styles/_chat.scss so
+           both projects read as one system: neutral zinc surfaces, a
+           monochrome primary that inverts in dark mode, fields marked by a
+           fill (never an outline), and focus drawn as a ring only. Light
+           values live on :root; dark values apply by system preference or
+           [data-theme] on <html>. */
         :root {
-            --bg-base: #f8fafc;
-            --card-bg: #ffffff;
-            --card-border: #e2e8f0;
-            --text-heading: #0f172a;
-            --text-body: #475569;
-            --text-muted: #94a3b8;
-            --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --code-bg: #090d16;
-            --code-color: #38bdf8;
-            --success: #10b981;
-            --danger: #ef4444;
-            --radius-card: 24px;
-            --radius-inner: 16px;
+            --ai-text: #1d1d1d;
+            --ai-text-secondary: #5e5e5f;
+            --ai-border: rgba(29, 29, 29, 0.12);
+            --ai-outline-variant: rgba(29, 29, 29, 0.16);
+            --ai-state-hover: rgba(24, 24, 27, 0.08);
+            --ai-surface-card: #ffffff;
+            --ai-surface-container: #f4f4f5;
+            --ai-surface-container-low: #f8f8f9;
+            --ai-surface-container-high: #ededef;
+            --ai-field-bg: #e8e8eb;
+            --ai-primary: #18181b;
+            --ai-primary-text: #ffffff;
+            --ai-primary-hover: #303033;
+            --ai-badge-bg: rgba(24, 24, 27, 0.12);
+            --ai-badge-text: #18181b;
+            --ai-focus-shadow: rgba(24, 24, 27, 0.22);
+            --ai-shadow-md: 0 8px 24px rgba(28, 27, 31, 0.14);
+            --ai-danger: #b91c1c;
+            --ai-success: #15803d;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --ai-text: #ededef;
+                --ai-text-secondary: #b0b0b3;
+                --ai-border: rgba(237, 237, 239, 0.12);
+                --ai-outline-variant: rgba(237, 237, 239, 0.16);
+                --ai-state-hover: rgba(255, 255, 255, 0.16);
+                --ai-surface-card: #19191b;
+                --ai-surface-container: #242426;
+                --ai-surface-container-low: #1c1c1e;
+                --ai-surface-container-high: #2e2e30;
+                --ai-field-bg: #343437;
+                --ai-primary: #ffffff;
+                --ai-primary-text: #000000;
+                --ai-primary-hover: #dfdfdf;
+                --ai-badge-bg: rgba(255, 255, 255, 0.16);
+                --ai-badge-text: #ffffff;
+                --ai-focus-shadow: rgba(255, 255, 255, 0.28);
+                --ai-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.5);
+                --ai-danger: #ff9a9a;
+                --ai-success: #6ee7a0;
+            }
+        }
+
+        :root[data-theme="dark"] {
+            --ai-text: #ededef;
+            --ai-text-secondary: #b0b0b3;
+            --ai-border: rgba(237, 237, 239, 0.12);
+            --ai-outline-variant: rgba(237, 237, 239, 0.16);
+            --ai-state-hover: rgba(255, 255, 255, 0.16);
+            --ai-surface-card: #19191b;
+            --ai-surface-container: #242426;
+            --ai-surface-container-low: #1c1c1e;
+            --ai-surface-container-high: #2e2e30;
+            --ai-field-bg: #343437;
+            --ai-primary: #ffffff;
+            --ai-primary-text: #000000;
+            --ai-primary-hover: #dfdfdf;
+            --ai-badge-bg: rgba(255, 255, 255, 0.16);
+            --ai-badge-text: #ffffff;
+            --ai-focus-shadow: rgba(255, 255, 255, 0.28);
+            --ai-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.5);
+            --ai-danger: #ff9a9a;
+            --ai-success: #6ee7a0;
         }
 
         * {
@@ -32,19 +86,14 @@
         }
 
         body {
-            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                "Microsoft YaHei", Roboto, sans-serif;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: var(--text-body);
-            background-color: var(--bg-base);
-            background-image: 
-                radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.04) 0%, transparent 40%),
-                radial-gradient(circle at 90% 80%, rgba(99, 102, 241, 0.04) 0%, transparent 40%),
-                linear-gradient(to right, rgba(226, 232, 240, 0.4) 1px, transparent 1px),
-                linear-gradient(to bottom, rgba(226, 232, 240, 0.4) 1px, transparent 1px);
-            background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+            color: var(--ai-text-secondary);
+            background-color: var(--ai-surface-container-low);
             padding: 24px;
             position: relative;
             overflow-x: hidden;
@@ -80,7 +129,7 @@
             align-items: center;
             gap: 10px;
             text-decoration: none;
-            color: var(--text-heading);
+            color: var(--ai-text);
             font-weight: 700;
             font-size: 1.05rem;
             letter-spacing: -0.01em;
@@ -89,28 +138,13 @@
             width: 32px;
             height: 32px;
             border-radius: 9px;
-            background: #0f172a;
-            color: #ffffff;
+            background: var(--ai-primary);
+            color: var(--ai-primary-text);
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 16px;
             font-weight: 800;
-        }
-        .nav-links {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
-        .nav-link {
-            text-decoration: none;
-            color: var(--text-muted);
-            font-size: 0.88rem;
-            font-weight: 500;
-            transition: color 0.2s;
-        }
-        .nav-link:hover {
-            color: var(--text-heading);
         }
 
         /* 主卡片容器 */
@@ -119,11 +153,11 @@
             z-index: 1;
             width: 100%;
             max-width: 440px;
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: var(--radius-card);
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
             padding: 38px 34px;
-            box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.03);
+            box-shadow: var(--ai-shadow-md);
             animation: cardEntrance 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
             opacity: 0;
             transform: translateY(20px);
@@ -145,29 +179,24 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #f1f5f9;
-            border: 1px solid #e2e8f0;
+            background: var(--ai-badge-bg);
+            color: var(--ai-badge-text);
             padding: 5px 12px;
             border-radius: 9999px;
             font-size: 0.76rem;
             font-weight: 600;
-            color: #475569;
             margin-bottom: 14px;
         }
-        .site-badge-wrapper .sparkle {
-            font-size: 0.85rem;
-            color: #2563eb;
-        }
         .card-header h1 {
-            font-size: 1.65rem;
-            font-weight: 800;
+            font-size: 1.6rem;
+            font-weight: 700;
             letter-spacing: -0.03em;
-            color: var(--text-heading);
+            color: var(--ai-text);
             margin-bottom: 8px;
         }
         .instruction-box {
             font-size: 0.92rem;
-            color: var(--text-body);
+            color: var(--ai-text-secondary);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -178,39 +207,35 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
-            color: #1d4ed8;
-            font-family: 'JetBrains Mono', monospace;
+            background: var(--ai-surface-container-high);
+            color: var(--ai-text);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-weight: 700;
             padding: 2px 10px;
-            border-radius: 8px;
+            border-radius: 9999px;
             font-size: 0.9rem;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: background 0.2s;
         }
         .group-pill:hover {
-            background: #dbeafe;
+            background: var(--ai-field-bg);
         }
 
-        /* 验证码展示区域：黑曜高对比度模块 */
+        /* 验证码展示区域：主色反白模块 */
         .code-display {
-            background: var(--code-bg);
-            border: 1px solid #1e293b;
-            border-radius: var(--radius-inner);
+            background: var(--ai-primary);
+            border-radius: 14px;
             padding: 26px 18px;
             text-align: center;
             margin-bottom: 22px;
             cursor: pointer;
             position: relative;
             overflow: hidden;
-            box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.4);
-            transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s;
         }
         .code-display:hover {
             transform: translateY(-2px);
-            box-shadow: 0 16px 36px -10px rgba(0, 0, 0, 0.5);
-            border-color: #38bdf8;
+            box-shadow: var(--ai-shadow-md);
         }
         .code-display:active {
             transform: scale(0.99);
@@ -220,42 +245,42 @@
             align-items: center;
             justify-content: space-between;
             padding: 0 6px 12px 6px;
-            color: #64748b;
+            color: var(--ai-primary-text);
+            opacity: 0.55;
             font-size: 0.72rem;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.06em;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-bottom: 1px solid var(--ai-primary-text);
             margin-bottom: 16px;
         }
         .code-label-bar .code-sym {
-            font-family: 'JetBrains Mono', monospace;
-            color: #94a3b8;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
         .code-text {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 2.7rem;
             font-weight: 700;
-            color: var(--code-color);
+            color: var(--ai-primary-text);
             letter-spacing: 12px;
             margin-right: -12px;
-            text-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
             user-select: all;
             line-height: 1.1;
         }
         .copy-hint {
             margin-top: 14px;
             font-size: 0.75rem;
-            color: #94a3b8;
             font-weight: 500;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 4px;
-            transition: color 0.2s;
+            color: var(--ai-primary-text);
+            opacity: 0.65;
+            transition: opacity 0.2s;
         }
         .code-display:hover .copy-hint {
-            color: #e2e8f0;
+            opacity: 1;
         }
 
         /* 状态与倒计时条 */
@@ -263,9 +288,8 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: var(--radius-inner);
+            background: var(--ai-surface-container);
+            border-radius: 14px;
             padding: 14px 18px;
             font-size: 0.88rem;
         }
@@ -274,14 +298,13 @@
             align-items: center;
             gap: 8px;
             font-weight: 600;
-            color: var(--text-body);
+            color: var(--ai-text);
         }
         .dot {
             width: 9px;
             height: 9px;
             border-radius: 50%;
-            background-color: var(--primary);
-            box-shadow: 0 0 10px rgba(37, 99, 235, 0.5);
+            background-color: var(--ai-success);
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
         @keyframes pulse {
@@ -290,13 +313,13 @@
         }
         .timer {
             font-variant-numeric: tabular-nums;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-weight: 600;
             font-size: 0.88rem;
-            color: #64748b;
+            color: var(--ai-text-secondary);
         }
         .timer span {
-            color: var(--text-heading);
+            color: var(--ai-text);
             font-weight: 700;
         }
 
@@ -304,17 +327,16 @@
         .tips-section {
             margin-top: 24px;
             padding-top: 20px;
-            border-top: 1px solid #f1f5f9;
+            border-top: 1px solid var(--ai-border);
             display: flex;
             align-items: flex-start;
             gap: 10px;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             font-size: 0.8rem;
             line-height: 1.5;
         }
         .tips-icon {
             font-size: 1rem;
-            color: #64748b;
             flex-shrink: 0;
             margin-top: 1px;
         }
@@ -340,11 +362,12 @@
             pointer-events: all;
         }
         .checkmark-card {
-            background: #ffffff;
-            border-radius: 28px;
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
             padding: 40px 48px;
             text-align: center;
-            box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.3);
+            box-shadow: var(--ai-shadow-md);
             transform: scale(0.85);
             transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
@@ -355,24 +378,21 @@
             width: 72px;
             height: 72px;
             border-radius: 50%;
-            background: #ecfdf5;
-            color: #059669;
-            border: 2px solid #a7f3d0;
+            color: var(--ai-success);
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 0 auto 18px;
-            box-shadow: 0 10px 25px rgba(16, 185, 129, 0.2);
         }
         .overlay-title {
             font-size: 1.4rem;
-            font-weight: 800;
-            color: #0f172a;
+            font-weight: 700;
+            color: var(--ai-text);
             margin-bottom: 6px;
         }
         .overlay-subtitle {
             font-size: 0.9rem;
-            color: #64748b;
+            color: var(--ai-text-secondary);
         }
 
         {{.CustomCSS}}
@@ -389,7 +409,7 @@
             <span>{{.SiteName}}</span>
         </a>
     </nav>
-    
+
     <div class="card-container">
         <div class="card-header">
             <div class="site-badge-wrapper">
@@ -404,7 +424,7 @@
                 </span>
             </div>
         </div>
-        
+
         <div class="code-display" onclick="copyCode()" title="点击一键复制验证码">
             <div class="code-label-bar">
                 <span class="code-sym">✦ VERIFY CODE</span>
@@ -419,7 +439,7 @@
                 <span>点击卡片一键复制</span>
             </div>
         </div>
-        
+
         <div class="status-container">
             <div class="status-indicator">
                 <div class="dot" id="statusDot"></div>
@@ -433,7 +453,7 @@
             <div>请使用绑定的 QQ 号在目标群内直接发送上方 6 位验证码，系统将自动核验并在 1 秒内完成跳转登录。</div>
         </div>
     </div>
-    
+
     <div class="overlay" id="successOverlay">
         <div class="checkmark-card">
             <div class="checkmark-circle">
@@ -452,7 +472,7 @@
         const timerEl = document.getElementById('timeLeft');
         const statusText = document.getElementById('statusText');
         const statusDot = document.getElementById('statusDot');
-        
+
         // 倒计时计时器
         const timerInterval = setInterval(() => {
             if (timeLeft > 0) {
@@ -463,11 +483,11 @@
                 setExpired();
             }
         }, 1000);
-        
+
         function setExpired() {
             statusText.textContent = "验证码已过期";
-            statusText.style.color = "var(--danger)";
-            statusDot.style.backgroundColor = "var(--danger)";
+            statusText.style.color = "var(--ai-danger)";
+            statusDot.style.backgroundColor = "var(--ai-danger)";
             statusDot.style.boxShadow = "none";
             statusDot.style.animation = "none";
             const cd = document.querySelector('.code-display');
@@ -476,31 +496,38 @@
                 cd.style.pointerEvents = 'none';
             }
         }
-        
+
+        const copyHintDefault = document.getElementById('copyHint').innerHTML;
+
         function copyCode() {
             const code = document.getElementById('verifyCode').innerText.trim();
             navigator.clipboard.writeText(code).then(() => {
                 const hint = document.getElementById('copyHint');
-                hint.innerHTML = '<span style="color: #38bdf8;">✓ 已复制验证码到剪贴板！</span>';
+                hint.innerHTML = '<span>✓ 已复制验证码到剪贴板！</span>';
                 setTimeout(() => {
-                    hint.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><span>点击卡片一键复制</span>';
+                    hint.innerHTML = copyHintDefault;
                 }, 2000);
             }).catch(err => {
-                console.error('Failed to copy code: ', err);
+                console.error("Failed to copy code: ", err);
             });
         }
 
+        // A transient inline hint rather than an alert: the pill is inside a
+        // fixed-height card and dialogs steal focus from the code to copy.
         function copyGroup(grp) {
             navigator.clipboard.writeText(grp).then(() => {
-                alert('群号 ' + grp + ' 已复制');
+                const pill = document.querySelector('.group-pill');
+                const original = pill.innerHTML;
+                pill.innerHTML = '✓ 已复制群号';
+                setTimeout(() => { pill.innerHTML = original; }, 1500);
             });
         }
-        
+
         // SSE 监听连接
         const sessionID = "{{.SessionID}}";
         if (sessionID) {
             const evtSource = new EventSource(`/api/session/stream?session_id=${sessionID}`);
-            
+
             evtSource.onmessage = function(event) {
                 try {
                     const data = JSON.parse(event.data);
@@ -517,22 +544,22 @@
                     console.error("Parse SSE data error:", e);
                 }
             };
-            
+
             evtSource.onerror = function() {
                 console.error("SSE connection error");
             };
         }
-        
+
         function showSuccess(redirectUri) {
             const overlay = document.getElementById('successOverlay');
             overlay.classList.add('active');
-            
+
             setTimeout(() => {
                 if (redirectUri) {
                     window.location.href = redirectUri;
                 } else {
                     statusText.textContent = "验证成功";
-                    statusText.style.color = "var(--success)";
+                    statusText.style.color = "var(--ai-success)";
                 }
             }, 1200);
         }

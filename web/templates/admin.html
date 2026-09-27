@@ -4,34 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OneAuth 控制台 - 统一身份认证系统</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
     <style>
+        /* Design tokens copied from ObsidianArc's web/src/styles/_chat.scss so
+           both projects read as one system: neutral zinc surfaces, a
+           monochrome primary that inverts in dark mode, fields marked by a
+           fill (never an outline), and focus drawn as a ring only. Light
+           values live on :root; dark values apply by system preference or
+           [data-theme] on <html>. */
         :root {
-            --bg-base: #f8fafc;
-            --card-bg: #ffffff;
-            --card-border: #e2e8f0;
-            --card-border-subtle: #f1f5f9;
-            --text-heading: #0f172a;
-            --text-body: #475569;
-            --text-muted: #94a3b8;
-            --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --primary-light: #eff6ff;
-            --primary-border: #bfdbfe;
-            --code-bg: #090d16;
-            --code-color: #38bdf8;
-            --success: #10b981;
-            --success-light: #ecfdf5;
-            --danger: #ef4444;
-            --danger-light: #fef2f2;
-            --warning: #f59e0b;
-            --radius-card: 20px;
-            --radius-inner: 14px;
-            --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.05);
-            --shadow-md: 0 4px 20px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04);
-            --shadow-lg: 0 20px 40px -15px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.03);
+            --ai-text: #1d1d1d;
+            --ai-text-secondary: #5e5e5f;
+            --ai-border: rgba(29, 29, 29, 0.12);
+            --ai-outline-variant: rgba(29, 29, 29, 0.16);
+            --ai-state-hover: rgba(24, 24, 27, 0.08);
+            --ai-surface-card: #ffffff;
+            --ai-surface-container: #f4f4f5;
+            --ai-surface-container-low: #f8f8f9;
+            --ai-surface-container-high: #ededef;
+            --ai-field-bg: #e8e8eb;
+            --ai-field-bg-hover: #e0e0e4;
+            --ai-primary: #18181b;
+            --ai-primary-text: #ffffff;
+            --ai-primary-hover: #303033;
+            --ai-badge-bg: rgba(24, 24, 27, 0.12);
+            --ai-badge-text: #18181b;
+            --ai-focus-shadow: rgba(24, 24, 27, 0.22);
+            --ai-shadow-md: 0 8px 24px rgba(28, 27, 31, 0.14);
+            --ai-danger: #b91c1c;
+            --ai-success: #15803d;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --ai-text: #ededef;
+                --ai-text-secondary: #b0b0b3;
+                --ai-border: rgba(237, 237, 239, 0.12);
+                --ai-outline-variant: rgba(237, 237, 239, 0.16);
+                --ai-state-hover: rgba(255, 255, 255, 0.16);
+                --ai-surface-card: #19191b;
+                --ai-surface-container: #242426;
+                --ai-surface-container-low: #1c1c1e;
+                --ai-surface-container-high: #2e2e30;
+                --ai-field-bg: #343437;
+                --ai-field-bg-hover: #3e3e41;
+                --ai-primary: #ffffff;
+                --ai-primary-text: #000000;
+                --ai-primary-hover: #dfdfdf;
+                --ai-badge-bg: rgba(255, 255, 255, 0.16);
+                --ai-badge-text: #ffffff;
+                --ai-focus-shadow: rgba(255, 255, 255, 0.28);
+                --ai-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.5);
+                --ai-danger: #ff9a9a;
+                --ai-success: #6ee7a0;
+            }
+        }
+
+        :root[data-theme="dark"] {
+            --ai-text: #ededef;
+            --ai-text-secondary: #b0b0b3;
+            --ai-border: rgba(237, 237, 239, 0.12);
+            --ai-outline-variant: rgba(237, 237, 239, 0.16);
+            --ai-state-hover: rgba(255, 255, 255, 0.16);
+            --ai-surface-card: #19191b;
+            --ai-surface-container: #242426;
+            --ai-surface-container-low: #1c1c1e;
+            --ai-surface-container-high: #2e2e30;
+            --ai-field-bg: #343437;
+            --ai-field-bg-hover: #3e3e41;
+            --ai-primary: #ffffff;
+            --ai-primary-text: #000000;
+            --ai-primary-hover: #dfdfdf;
+            --ai-badge-bg: rgba(255, 255, 255, 0.16);
+            --ai-badge-text: #ffffff;
+            --ai-focus-shadow: rgba(255, 255, 255, 0.28);
+            --ai-shadow-md: 0 8px 28px rgba(0, 0, 0, 0.5);
+            --ai-danger: #ff9a9a;
+            --ai-success: #6ee7a0;
         }
 
         * {
@@ -41,16 +89,11 @@
         }
 
         body {
-            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                "Microsoft YaHei", Roboto, sans-serif;
             min-height: 100vh;
-            color: var(--text-body);
-            background-color: var(--bg-base);
-            background-image: 
-                radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.03) 0%, transparent 40%),
-                radial-gradient(circle at 90% 80%, rgba(99, 102, 241, 0.03) 0%, transparent 40%),
-                linear-gradient(to right, rgba(226, 232, 240, 0.4) 1px, transparent 1px),
-                linear-gradient(to bottom, rgba(226, 232, 240, 0.4) 1px, transparent 1px);
-            background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+            color: var(--ai-text-secondary);
+            background-color: var(--ai-surface-container-low);
             position: relative;
             overflow-x: hidden;
         }
@@ -77,10 +120,8 @@
         /* 侧边导航栏 */
         .sidebar {
             width: 270px;
-            background: rgba(255, 255, 255, 0.88);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border-right: 1px solid var(--card-border);
+            background: var(--ai-surface-card);
+            border-right: 1px solid var(--ai-border);
             padding: 28px 18px;
             display: flex;
             flex-direction: column;
@@ -103,20 +144,19 @@
             width: 36px;
             height: 36px;
             border-radius: 10px;
-            background: #0f172a;
+            background: var(--ai-primary);
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #ffffff;
+            color: var(--ai-primary-text);
             font-size: 18px;
             font-weight: 800;
-            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
         }
         .brand-text h1 {
             font-size: 1.15rem;
-            font-weight: 800;
+            font-weight: 700;
             letter-spacing: -0.02em;
-            color: var(--text-heading);
+            color: var(--ai-text);
             display: flex;
             align-items: center;
             gap: 6px;
@@ -125,15 +165,14 @@
             font-size: 0.65rem;
             padding: 2px 7px;
             border-radius: 9999px;
-            background: #eff6ff;
-            color: var(--primary);
-            border: 1px solid var(--primary-border);
+            background: var(--ai-badge-bg);
+            color: var(--ai-badge-text);
             font-weight: 700;
             text-transform: uppercase;
         }
         .brand-subtitle {
             font-size: 0.72rem;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             margin-top: 1px;
             font-weight: 500;
         }
@@ -143,7 +182,7 @@
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             padding: 0 12px;
             margin: 18px 0 8px;
         }
@@ -154,14 +193,13 @@
             justify-content: space-between;
             padding: 11px 14px;
             border-radius: 12px;
-            color: var(--text-body);
+            color: var(--ai-text-secondary);
             text-decoration: none;
             margin-bottom: 4px;
-            transition: all 0.2s ease;
+            transition: background 0.2s ease, color 0.2s ease;
             font-size: 0.9rem;
             font-weight: 600;
             cursor: pointer;
-            border: 1px solid transparent;
         }
         .nav-link-content {
             display: flex;
@@ -174,44 +212,36 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: transform 0.2s;
         }
         .sidebar-nav a:hover {
-            color: var(--text-heading);
-            background: #f1f5f9;
-            transform: translateX(2px);
+            color: var(--ai-text);
+            background: var(--ai-state-hover);
         }
         .sidebar-nav a.active {
-            color: var(--primary);
-            background: #eff6ff;
-            border-color: #bfdbfe;
+            color: var(--ai-text);
+            background: var(--ai-surface-container-high);
         }
         .nav-pill {
             font-size: 0.7rem;
             padding: 2px 7px;
             border-radius: 9999px;
-            background: #e2e8f0;
-            color: var(--text-body);
-            font-family: 'JetBrains Mono', monospace;
+            background: var(--ai-badge-bg);
+            color: var(--ai-badge-text);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-weight: 600;
-        }
-        .sidebar-nav a.active .nav-pill {
-            background: #bfdbfe;
-            color: var(--primary);
         }
 
         .sidebar-footer {
             padding-top: 16px;
-            border-top: 1px solid var(--card-border);
+            border-top: 1px solid var(--ai-border);
         }
         .user-profile-badge {
             display: flex;
             align-items: center;
             justify-content: space-between;
             padding: 8px 10px;
-            background: #f8fafc;
+            background: var(--ai-surface-container);
             border-radius: 12px;
-            border: 1px solid var(--card-border);
         }
         .user-info-box {
             display: flex;
@@ -222,11 +252,11 @@
             width: 32px;
             height: 32px;
             border-radius: 9px;
-            background: #0f172a;
+            background: var(--ai-primary);
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #fff;
+            color: var(--ai-primary-text);
             font-weight: 700;
             font-size: 13px;
         }
@@ -234,23 +264,23 @@
             display: flex;
             flex-direction: column;
         }
-        .user-name { font-size: 0.82rem; font-weight: 700; color: var(--text-heading); }
-        .user-status { font-size: 0.7rem; color: var(--success); display: flex; align-items: center; gap: 4px; font-weight: 600; }
-        .status-dot-mini { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+        .user-name { font-size: 0.82rem; font-weight: 700; color: var(--ai-text); }
+        .user-status { font-size: 0.7rem; color: var(--ai-success); display: flex; align-items: center; gap: 4px; font-weight: 600; }
+        .status-dot-mini { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-success); }
         .btn-logout {
             background: transparent;
             border: none;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             font-size: 1rem;
             cursor: pointer;
             padding: 6px;
             border-radius: 8px;
-            transition: all 0.2s;
+            transition: background 0.2s, color 0.2s;
             display: flex;
             align-items: center;
             justify-content: center;
         }
-        .btn-logout:hover { color: var(--danger); background: var(--danger-light); }
+        .btn-logout:hover { color: var(--ai-danger); background: var(--ai-state-hover); }
 
         /* 主体内容区域 */
         .main-content {
@@ -271,9 +301,9 @@
             gap: 16px;
         }
         .page-header-text h2 {
-            font-size: 1.65rem;
-            font-weight: 800;
-            color: var(--text-heading);
+            font-size: 1.55rem;
+            font-weight: 700;
+            color: var(--ai-text);
             letter-spacing: -0.03em;
             display: flex;
             align-items: center;
@@ -281,7 +311,7 @@
         }
         .page-header-text p {
             font-size: 0.9rem;
-            color: var(--text-body);
+            color: var(--ai-text-secondary);
             margin-top: 4px;
         }
         .header-actions {
@@ -294,18 +324,17 @@
             align-items: center;
             gap: 12px;
             padding: 8px 16px;
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
             border-radius: 12px;
-            box-shadow: var(--shadow-sm);
         }
         .status-metric {
             display: flex;
             flex-direction: column;
             align-items: flex-end;
         }
-        .metric-label { font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; letter-spacing: 0.05em; }
-        .metric-value { font-size: 0.85rem; font-weight: 700; color: var(--text-heading); font-family: 'JetBrains Mono', monospace; }
+        .metric-label { font-size: 0.68rem; text-transform: uppercase; color: var(--ai-text-secondary); font-weight: 700; letter-spacing: 0.05em; }
+        .metric-value { font-size: 0.85rem; font-weight: 700; color: var(--ai-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
         /* 统计卡片网格 */
         .stats-grid {
@@ -315,47 +344,39 @@
             margin-bottom: 26px;
         }
         .stat-card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: var(--radius-card);
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
             padding: 22px;
-            box-shadow: var(--shadow-sm);
-            transition: all 0.25s ease;
+            transition: border-color 0.25s ease;
             position: relative;
             overflow: hidden;
         }
         .stat-card:hover {
-            border-color: #cbd5e1;
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-md);
+            border-color: var(--ai-outline-variant);
         }
         .stat-icon {
             width: 40px;
             height: 40px;
             border-radius: 10px;
-            background: #f1f5f9;
+            background: var(--ai-surface-container-high);
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 1.2rem;
             margin-bottom: 14px;
         }
-        .stat-val { font-size: 1.65rem; font-weight: 800; color: var(--text-heading); letter-spacing: -0.02em; font-family: 'JetBrains Mono', monospace; }
-        .stat-label { font-size: 0.84rem; color: var(--text-body); margin-top: 4px; font-weight: 600; }
-        .stat-hint { font-size: 0.72rem; color: var(--primary); margin-top: 8px; font-weight: 600; }
+        .stat-val { font-size: 1.65rem; font-weight: 700; color: var(--ai-text); letter-spacing: -0.02em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        .stat-label { font-size: 0.84rem; color: var(--ai-text-secondary); margin-top: 4px; font-weight: 600; }
+        .stat-hint { font-size: 0.72rem; color: var(--ai-text-secondary); margin-top: 8px; font-weight: 600; }
 
         /* 容器卡片 */
         .card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: var(--radius-card);
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
             padding: 28px 30px;
             margin-bottom: 24px;
-            box-shadow: var(--shadow-sm);
-            transition: box-shadow 0.25s ease;
-        }
-        .card:hover {
-            box-shadow: var(--shadow-md);
         }
         .card-header {
             display: flex;
@@ -363,7 +384,7 @@
             justify-content: space-between;
             margin-bottom: 22px;
             padding-bottom: 16px;
-            border-bottom: 1px solid var(--card-border-subtle);
+            border-bottom: 1px solid var(--ai-border);
         }
         .card-title-box {
             display: flex;
@@ -376,16 +397,16 @@
         .card-title {
             font-size: 1.08rem;
             font-weight: 700;
-            color: var(--text-heading);
+            color: var(--ai-text);
             letter-spacing: -0.01em;
         }
         .card-desc {
             font-size: 0.82rem;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             margin-top: 2px;
         }
 
-        /* 表单样式 */
+        /* 表单样式：填充标记控件，无描边，焦点只画环 */
         .form-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -403,13 +424,13 @@
             justify-content: space-between;
             font-size: 0.86rem;
             font-weight: 600;
-            color: var(--text-heading);
+            color: var(--ai-text);
             margin-bottom: 8px;
         }
         .label-hint {
             font-size: 0.74rem;
             font-weight: 500;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
         }
         .input-wrapper {
             position: relative;
@@ -419,82 +440,71 @@
         .input-icon {
             position: absolute;
             left: 14px;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             font-size: 1rem;
             pointer-events: none;
         }
         .form-group input, .form-group textarea {
             width: 100%;
             padding: 11px 16px 11px 40px;
-            background: #ffffff;
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            color: var(--text-heading);
+            background: var(--ai-field-bg);
+            border: none;
+            border-radius: 11px;
+            color: var(--ai-text);
             font-family: inherit;
             font-size: 0.9rem;
             outline: none;
-            transition: all 0.2s;
+            transition: background 0.2s, box-shadow 0.2s;
         }
         .form-group textarea {
             padding: 12px 16px;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 0.84rem;
             line-height: 1.5;
             resize: vertical;
         }
+        .form-group input:hover, .form-group textarea:hover { background: var(--ai-field-bg-hover); }
         .form-group input:focus, .form-group textarea:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+            background: var(--ai-field-bg);
+            box-shadow: 0 0 0 2px var(--ai-surface-card), 0 0 0 4px var(--ai-focus-shadow);
         }
 
-        /* 按钮设计 */
+        /* 按钮设计：药丸形 */
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
-            padding: 10px 20px;
-            border: 1px solid transparent;
-            border-radius: 10px;
+            padding: 9px 20px;
+            border: none;
+            border-radius: 999px;
             font-family: inherit;
             font-size: 0.88rem;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: background 0.2s, color 0.2s;
             text-decoration: none;
         }
         .btn-primary {
-            background: var(--primary);
-            color: #ffffff;
-            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+            background: var(--ai-primary);
+            color: var(--ai-primary-text);
         }
-        .btn-primary:hover {
-            background: var(--primary-hover);
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
-        }
+        .btn-primary:hover { background: var(--ai-primary-hover); }
         .btn-primary:active { transform: translateY(0); }
         .btn-secondary {
-            background: #ffffff;
-            color: var(--text-heading);
-            border: 1px solid var(--card-border);
+            background: var(--ai-field-bg);
+            color: var(--ai-text);
         }
-        .btn-secondary:hover {
-            background: #f8fafc;
-            border-color: #cbd5e1;
-        }
+        .btn-secondary:hover { background: var(--ai-field-bg-hover); }
         .btn-danger {
-            background: var(--danger-light);
-            color: var(--danger);
-            border: 1px solid #fecaca;
-            padding: 6px 12px;
+            background: var(--ai-field-bg);
+            color: var(--ai-danger);
+            padding: 6px 14px;
             font-size: 0.8rem;
-            border-radius: 8px;
         }
         .btn-danger:hover {
-            background: var(--danger);
+            background: var(--ai-danger);
             color: #ffffff;
-            border-color: var(--danger);
         }
 
         /* 协议与应用列表卡片项 */
@@ -508,15 +518,15 @@
             align-items: center;
             justify-content: space-between;
             padding: 16px 20px;
-            background: #f8fafc;
-            border: 1px solid var(--card-border);
+            background: var(--ai-surface-container-low);
+            border: 1px solid var(--ai-border);
             border-radius: 14px;
-            transition: all 0.2s;
+            gap: 12px;
+            flex-wrap: wrap;
+            transition: border-color 0.2s;
         }
         .client-item:hover {
-            background: #ffffff;
-            border-color: #cbd5e1;
-            box-shadow: var(--shadow-sm);
+            border-color: var(--ai-outline-variant);
         }
         .client-meta {
             display: flex;
@@ -527,44 +537,128 @@
             width: 40px;
             height: 40px;
             border-radius: 10px;
-            background: #eff6ff;
-            border: 1px solid var(--primary-border);
+            background: var(--ai-surface-container-high);
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 1.2rem;
-            color: var(--primary);
         }
         .client-name-id {
             display: flex;
             flex-direction: column;
             gap: 3px;
         }
-        .client-name { font-size: 0.95rem; font-weight: 700; color: var(--text-heading); }
+        .client-name { font-size: 0.95rem; font-weight: 700; color: var(--ai-text); }
         .client-id {
             font-size: 0.76rem;
-            color: var(--text-body);
-            font-family: 'JetBrains Mono', monospace;
-            background: #ffffff;
+            color: var(--ai-text-secondary);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            background: var(--ai-surface-card);
             padding: 2px 8px;
             border-radius: 6px;
             width: fit-content;
-            border: 1px solid var(--card-border);
+            border: 1px solid var(--ai-border);
         }
         .client-uris-badge {
             font-size: 0.78rem;
-            color: var(--text-body);
+            color: var(--ai-text-secondary);
             max-width: 320px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
 
-        /* 登录弹窗 (遵循授权页卡片风格) */
+        /* 弹窗（凭证展示 / 确认操作） */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.55);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+            padding: 20px;
+        }
+        .modal-box {
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
+            padding: 28px;
+            width: 100%;
+            max-width: 480px;
+            box-shadow: var(--ai-shadow-md);
+        }
+        .modal-box h3 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--ai-text);
+            margin-bottom: 6px;
+        }
+        .modal-desc {
+            font-size: 0.86rem;
+            color: var(--ai-text-secondary);
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+        .credential-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .credential-row .credential-label {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--ai-text-secondary);
+            display: block;
+            margin-bottom: 6px;
+        }
+        .credential-value {
+            flex: 1;
+            min-width: 0;
+            background: var(--ai-surface-container-high);
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.84rem;
+            color: var(--ai-text);
+            user-select: all;
+            overflow-wrap: anywhere;
+        }
+        .copy-btn {
+            background: var(--ai-field-bg);
+            border: none;
+            border-radius: 999px;
+            padding: 8px 14px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--ai-text);
+            cursor: pointer;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+        .copy-btn:hover { background: var(--ai-field-bg-hover); }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .modal-actions .btn-danger-solid {
+            background: var(--ai-danger);
+            color: #ffffff;
+        }
+        .modal-actions .btn-danger-solid:hover { filter: brightness(0.92); }
+
+        /* 登录弹窗 */
         .login-overlay {
             position: fixed;
             inset: 0;
-            background: rgba(15, 23, 42, 0.6);
+            background: rgba(15, 23, 42, 0.55);
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
             display: flex;
@@ -574,13 +668,13 @@
             padding: 20px;
         }
         .login-box {
-            background: #ffffff;
-            border: 1px solid var(--card-border);
-            border-radius: 24px;
+            background: var(--ai-surface-card);
+            border: 1px solid var(--ai-border);
+            border-radius: 18px;
             padding: 40px 36px;
             width: 100%;
             max-width: 420px;
-            box-shadow: 0 25px 60px -15px rgba(15, 23, 42, 0.25);
+            box-shadow: var(--ai-shadow-md);
             text-align: center;
             position: relative;
         }
@@ -588,25 +682,24 @@
             width: 52px;
             height: 52px;
             border-radius: 14px;
-            background: #0f172a;
+            background: var(--ai-primary);
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 0 auto 16px;
             font-size: 24px;
-            color: #ffffff;
-            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+            color: var(--ai-primary-text);
         }
         .login-box h2 {
             font-size: 1.45rem;
-            font-weight: 800;
-            color: var(--text-heading);
+            font-weight: 700;
+            color: var(--ai-text);
             margin-bottom: 6px;
             letter-spacing: -0.02em;
         }
         .login-desc {
             font-size: 0.88rem;
-            color: var(--text-muted);
+            color: var(--ai-text-secondary);
             margin-bottom: 26px;
         }
 
@@ -621,7 +714,7 @@
             font-weight: 600;
             color: #ffffff;
             z-index: 1000;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.12);
+            box-shadow: var(--ai-shadow-md);
             display: none;
             align-items: center;
             gap: 8px;
@@ -631,8 +724,8 @@
             from { opacity: 0; transform: translateY(14px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        .toast.success { background: #059669; border: 1px solid #10b981; }
-        .toast.error { background: #dc2626; border: 1px solid #ef4444; }
+        .toast.success { background: #15803d; }
+        .toast.error { background: #b91c1c; }
         .toast.show { display: flex; }
 
         .hidden { display: none !important; }
@@ -640,7 +733,7 @@
         /* 响应式调整 */
         @media (max-width: 860px) {
             .app-shell { flex-direction: column; }
-            .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--card-border); padding: 18px 20px; }
+            .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--ai-border); padding: 18px 20px; }
             .main-content { padding: 20px; }
         }
     </style>
@@ -672,6 +765,43 @@
             <button class="btn btn-primary" style="width:100%; margin-top: 6px;" id="authBtn" onclick="submitAuth()">
                 <span>进入控制台</span> ➔
             </button>
+        </div>
+    </div>
+
+    <!-- 凭据展示弹窗：创建成功后在这里读 Client Secret，可逐项复制 -->
+    <div class="modal-overlay hidden" id="secretModal">
+        <div class="modal-box">
+            <h3>客户端创建成功</h3>
+            <p class="modal-desc">Client Secret 仅在本次展示，请立即复制并写入应用配置。</p>
+            <div>
+                <span class="credential-label">Client ID</span>
+                <div class="credential-row">
+                    <span class="credential-value" id="secretClientId"></span>
+                    <button class="copy-btn" onclick="copyText('secretClientId', this)">复制</button>
+                </div>
+            </div>
+            <div>
+                <span class="credential-label">Client Secret</span>
+                <div class="credential-row">
+                    <span class="credential-value" id="secretClientSecret"></span>
+                    <button class="copy-btn" onclick="copyText('secretClientSecret', this)">复制</button>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="closeSecretModal()">我已保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通用确认弹窗：替代 window.confirm -->
+    <div class="modal-overlay hidden" id="confirmModal">
+        <div class="modal-box">
+            <h3 id="confirmTitle">确认操作</h3>
+            <p class="modal-desc" id="confirmDesc"></p>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeConfirmModal(false)">取消</button>
+                <button class="btn btn-danger-solid" id="confirmAccept">确认</button>
+            </div>
         </div>
     </div>
 
@@ -764,7 +894,7 @@
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon">⚡</div>
-                        <div class="stat-val" style="color:var(--success)">WAL 模式</div>
+                        <div class="stat-val" style="color:var(--ai-success)">WAL 模式</div>
                         <div class="stat-label">SQLite 持久化引擎</div>
                         <div class="stat-hint">并发无锁高吞吐</div>
                     </div>
@@ -776,7 +906,7 @@
                             <span class="card-icon">🌐</span>
                             <div>
                                 <div class="card-title">标准 OIDC 协议端点列表</div>
-                                <div class="card-desc">供业务系统 (如 Gitea, Nextcloud, Grafana) 直接配置对接使用。</div>
+                                <div class="card-desc">供业务系统 (如 ObsidianArc, Gitea, Nextcloud) 直接配置对接使用。</div>
                             </div>
                         </div>
                     </div>
@@ -809,7 +939,7 @@
                                     <div class="client-id">WS /ws/onebot</div>
                                 </div>
                             </div>
-                            <span class="brand-badge" style="color:var(--success); border-color:var(--success);">监听中</span>
+                            <span class="brand-badge" style="color:var(--ai-success);">监听中</span>
                         </div>
                     </div>
                 </div>
@@ -1153,6 +1283,14 @@
         }
     }
 
+    // Client names and URIs come back out of the database and into markup, so
+    // everything interpolates through this.
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     async function loadClients() {
         let res = await fetch('/api/admin/clients', { headers: {'Authorization': 'Bearer ' + token} });
         let clients = await res.json();
@@ -1165,16 +1303,20 @@
                     '<div class="client-meta">' +
                         '<div class="client-icon-avatar">🔑</div>' +
                         '<div class="client-name-id">' +
-                            '<div class="client-name">' + (c.client_name || '未命名应用') + '</div>' +
-                            '<div class="client-id">' + (c.client_id || '') + '</div>' +
+                            '<div class="client-name">' + escapeHtml(c.client_name || '未命名应用') + '</div>' +
+                            '<div class="client-id">' + escapeHtml(c.client_id || '') + '</div>' +
                         '</div>' +
                     '</div>' +
-                    '<div class="client-uris-badge" title="' + (c.redirect_uris || '') + '">回调: ' + (c.redirect_uris || '') + '</div>' +
-                    '<button class="btn btn-danger" onclick="deleteClient(\'' + c.client_id + '\')">🗑️ 移除</button>' +
+                    '<div class="client-uris-badge" title="' + escapeHtml(c.redirect_uris || '') + '">回调: ' + escapeHtml(c.redirect_uris || '') + '</div>' +
+                    '<button class="btn btn-danger" data-client-id="' + escapeHtml(c.client_id) + '">🗑️ 移除</button>' +
                 '</div>';
             });
         }
-        document.getElementById('clientList').innerHTML = html || '<div style="text-align:center;padding:36px;color:var(--text-muted);">暂无注册应用，请在上方创建第一个 OIDC Client</div>';
+        const list = document.getElementById('clientList');
+        list.innerHTML = html || '<div style="text-align:center;padding:36px;color:var(--ai-text-secondary);">暂无注册应用，请在上方创建第一个 OIDC Client</div>';
+        list.querySelectorAll('.btn-danger[data-client-id]').forEach(btn => {
+            btn.addEventListener('click', () => removeClient(btn.dataset.clientId));
+        });
         document.getElementById('clientCountPill').innerText = count;
         document.getElementById('statClientCount').innerText = count;
     }
@@ -1191,25 +1333,67 @@
         });
         let data = await res.json();
         if (res.ok) {
-            alert('🎉 客户端创建成功！\n\nClient ID: ' + data.client_id + '\nClient Secret: ' + data.client_secret + '\n\n【注意】密钥仅展示一次，请立即复制并写入应用配置中！');
             document.getElementById('newClientName').value = '';
             document.getElementById('newRedirectURIs').value = '';
+            document.getElementById('secretClientId').textContent = data.client_id || '';
+            document.getElementById('secretClientSecret').textContent = data.client_secret || '';
+            document.getElementById('secretModal').classList.remove('hidden');
             loadClients();
-            showToast('新应用已就绪', 'success');
         } else {
             showToast(data.error || '创建失败', 'error');
         }
     }
 
-    async function deleteClient(id) {
-        if (!confirm('确定彻底移除该客户端？移除后使用该 Client ID 的业务系统将无法登录！')) return;
-        await fetch('/api/admin/clients/' + id, {
-            method: 'DELETE',
-            headers: {'Authorization': 'Bearer ' + token}
-        });
-        loadClients();
-        showToast('已移除客户端', 'success');
+    function closeSecretModal() {
+        document.getElementById('secretModal').classList.add('hidden');
     }
+
+    async function copyText(elementId, button) {
+        const text = document.getElementById(elementId).textContent;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch (e) {
+            // Clipboard permission refused or unavailable: fall back to
+            // selecting the value so Ctrl+C still works.
+            const range = document.createRange();
+            range.selectNodeContents(document.getElementById(elementId));
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+        if (button) {
+            const original = button.textContent;
+            button.textContent = '已复制';
+            setTimeout(() => { button.textContent = original; }, 1500);
+        }
+    }
+
+    // removeClient routes through the in-page confirmation; window.confirm
+    // returns immediately in some contexts and would delete without an answer.
+    function removeClient(id) {
+        confirmAction('移除客户端', '移除后使用该 Client ID 的业务系统将无法登录，且不可恢复。确定继续吗？', async () => {
+            await fetch('/api/admin/clients/' + encodeURIComponent(id), {
+                method: 'DELETE',
+                headers: {'Authorization': 'Bearer ' + token}
+            });
+            loadClients();
+            showToast('已移除客户端', 'success');
+        });
+    }
+
+    let confirmHandler = null;
+    function confirmAction(title, desc, onAccept) {
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmDesc').textContent = desc;
+        confirmHandler = onAccept;
+        document.getElementById('confirmModal').classList.remove('hidden');
+    }
+    function closeConfirmModal(accepted) {
+        document.getElementById('confirmModal').classList.add('hidden');
+        if (accepted && confirmHandler) confirmHandler();
+        confirmHandler = null;
+    }
+    document.getElementById('confirmAccept').addEventListener('click', () => closeConfirmModal(true));
 
     function switchNav(el, pageName) {
         document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
@@ -1223,14 +1407,14 @@
             const el = document.getElementById('page-' + p);
             if (el) el.classList.add('hidden');
         });
-        
+
         const targetPage = document.getElementById('page-' + name);
         if (targetPage) targetPage.classList.remove('hidden');
     }
 
     function showToast(msg, type = 'success') {
         const toast = document.getElementById('toast');
-        toast.innerHTML = (type === 'success' ? '✅ ' : '❌ ') + msg;
+        toast.textContent = (type === 'success' ? '✅ ' : '❌ ') + msg;
         toast.className = 'toast ' + type + ' show';
         setTimeout(() => toast.classList.remove('show'), 3500);
     }
