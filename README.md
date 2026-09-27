@@ -191,20 +191,12 @@ Docker Compose 能够**一行命令同时启动两个容器**：
 
 ---
 
-#### 启动方式（无需改文件，直接命令行传参）：
-在终端中直接把 QQ 号传给环境变量启动：
-
-**Linux / macOS:**
+#### 一键启动（默认网页扫码登录，零配置）：
+直接在终端执行：
 ```bash
-BOT_QQ=你的机器人QQ号 docker compose up -d --build
+docker compose up -d --build
 ```
-
-**Windows PowerShell:**
-```powershell
-$env:BOT_QQ="你的机器人QQ号"; docker compose up -d --build
-```
-
-> 💡 **免填说明**：即使启动时不传 QQ 号，也可以直接运行 `docker compose up -d --build`，稍后直接打开 `http://<服务器IP>:6099/webui` 网页扫码登录任意 QQ 号即可喵！
+> 启动后，浏览器访问 `http://<服务器IP>:6099/webui` 即可直接扫码登录任意 QQ 号，无需预填任何账号喵！
 
 ---
 
@@ -239,7 +231,6 @@ services:
     environment:
       - NAPCAT_GID=0
       - NAPCAT_UID=0
-      - ACCOUNT=${BOT_QQ:-}   # 支持通过参数传入，不填则默认扫码
     volumes:
       - napcat-data:/app/.config/QQ
       - napcat-config:/app/napcat/config
