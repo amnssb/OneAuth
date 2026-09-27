@@ -1,0 +1,1256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OneAuth 控制台 - 统一身份认证系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #f8fafc;
+            --card-bg: #ffffff;
+            --card-border: #e2e8f0;
+            --card-border-subtle: #f1f5f9;
+            --text-heading: #0f172a;
+            --text-body: #475569;
+            --text-muted: #94a3b8;
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --primary-light: #eff6ff;
+            --primary-border: #bfdbfe;
+            --code-bg: #090d16;
+            --code-color: #38bdf8;
+            --success: #10b981;
+            --success-light: #ecfdf5;
+            --danger: #ef4444;
+            --danger-light: #fef2f2;
+            --warning: #f59e0b;
+            --radius-card: 20px;
+            --radius-inner: 14px;
+            --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.05);
+            --shadow-md: 0 4px 20px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04);
+            --shadow-lg: 0 20px 40px -15px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.03);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-height: 100vh;
+            color: var(--text-body);
+            background-color: var(--bg-base);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.03) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(99, 102, 241, 0.03) 0%, transparent 40%),
+                linear-gradient(to right, rgba(226, 232, 240, 0.4) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(226, 232, 240, 0.4) 1px, transparent 1px);
+            background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        .bg-layer {
+            position: fixed;
+            inset: 0;
+            background-size: cover;
+            background-position: center;
+            opacity: 0.06;
+            filter: blur(24px);
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        /* 布局外壳 */
+        .app-shell {
+            display: flex;
+            min-height: 100vh;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* 侧边导航栏 */
+        .sidebar {
+            width: 270px;
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-right: 1px solid var(--card-border);
+            padding: 28px 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            flex-shrink: 0;
+        }
+
+        .sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 4px 10px;
+            margin-bottom: 30px;
+            text-decoration: none;
+        }
+        .brand-logo-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            background: #0f172a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 800;
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+        }
+        .brand-text h1 {
+            font-size: 1.15rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            color: var(--text-heading);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .brand-badge {
+            font-size: 0.65rem;
+            padding: 2px 7px;
+            border-radius: 9999px;
+            background: #eff6ff;
+            color: var(--primary);
+            border: 1px solid var(--primary-border);
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .brand-subtitle {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-top: 1px;
+            font-weight: 500;
+        }
+
+        .nav-section-title {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            padding: 0 12px;
+            margin: 18px 0 8px;
+        }
+
+        .sidebar-nav a {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 11px 14px;
+            border-radius: 12px;
+            color: var(--text-body);
+            text-decoration: none;
+            margin-bottom: 4px;
+            transition: all 0.2s ease;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .nav-link-content {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .sidebar-nav a .icon {
+            font-size: 1.1rem;
+            width: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s;
+        }
+        .sidebar-nav a:hover {
+            color: var(--text-heading);
+            background: #f1f5f9;
+            transform: translateX(2px);
+        }
+        .sidebar-nav a.active {
+            color: var(--primary);
+            background: #eff6ff;
+            border-color: #bfdbfe;
+        }
+        .nav-pill {
+            font-size: 0.7rem;
+            padding: 2px 7px;
+            border-radius: 9999px;
+            background: #e2e8f0;
+            color: var(--text-body);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+        .sidebar-nav a.active .nav-pill {
+            background: #bfdbfe;
+            color: var(--primary);
+        }
+
+        .sidebar-footer {
+            padding-top: 16px;
+            border-top: 1px solid var(--card-border);
+        }
+        .user-profile-badge {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 1px solid var(--card-border);
+        }
+        .user-info-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 9px;
+            background: #0f172a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: 700;
+            font-size: 13px;
+        }
+        .user-name-role {
+            display: flex;
+            flex-direction: column;
+        }
+        .user-name { font-size: 0.82rem; font-weight: 700; color: var(--text-heading); }
+        .user-status { font-size: 0.7rem; color: var(--success); display: flex; align-items: center; gap: 4px; font-weight: 600; }
+        .status-dot-mini { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+        .btn-logout {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 6px;
+            border-radius: 8px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .btn-logout:hover { color: var(--danger); background: var(--danger-light); }
+
+        /* 主体内容区域 */
+        .main-content {
+            flex: 1;
+            padding: 36px 44px;
+            max-width: 1180px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        /* 顶部 Header */
+        .page-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 28px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .page-header-text h2 {
+            font-size: 1.65rem;
+            font-weight: 800;
+            color: var(--text-heading);
+            letter-spacing: -0.03em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .page-header-text p {
+            font-size: 0.9rem;
+            color: var(--text-body);
+            margin-top: 4px;
+        }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header-status-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 16px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            box-shadow: var(--shadow-sm);
+        }
+        .status-metric {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+        .metric-label { font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; letter-spacing: 0.05em; }
+        .metric-value { font-size: 0.85rem; font-weight: 700; color: var(--text-heading); font-family: 'JetBrains Mono', monospace; }
+
+        /* 统计卡片网格 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 18px;
+            margin-bottom: 26px;
+        }
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-card);
+            padding: 22px;
+            box-shadow: var(--shadow-sm);
+            transition: all 0.25s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .stat-card:hover {
+            border-color: #cbd5e1;
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+        .stat-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: #f1f5f9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            margin-bottom: 14px;
+        }
+        .stat-val { font-size: 1.65rem; font-weight: 800; color: var(--text-heading); letter-spacing: -0.02em; font-family: 'JetBrains Mono', monospace; }
+        .stat-label { font-size: 0.84rem; color: var(--text-body); margin-top: 4px; font-weight: 600; }
+        .stat-hint { font-size: 0.72rem; color: var(--primary); margin-top: 8px; font-weight: 600; }
+
+        /* 容器卡片 */
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-card);
+            padding: 28px 30px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-sm);
+            transition: box-shadow 0.25s ease;
+        }
+        .card:hover {
+            box-shadow: var(--shadow-md);
+        }
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 22px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--card-border-subtle);
+        }
+        .card-title-box {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .card-title-box .card-icon {
+            font-size: 1.25rem;
+        }
+        .card-title {
+            font-size: 1.08rem;
+            font-weight: 700;
+            color: var(--text-heading);
+            letter-spacing: -0.01em;
+        }
+        .card-desc {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* 表单样式 */
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+        .form-group label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.86rem;
+            font-weight: 600;
+            color: var(--text-heading);
+            margin-bottom: 8px;
+        }
+        .label-hint {
+            font-size: 0.74rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        .input-icon {
+            position: absolute;
+            left: 14px;
+            color: var(--text-muted);
+            font-size: 1rem;
+            pointer-events: none;
+        }
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 11px 16px 11px 40px;
+            background: #ffffff;
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            color: var(--text-heading);
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+        .form-group textarea {
+            padding: 12px 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.84rem;
+            line-height: 1.5;
+            resize: vertical;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+        }
+
+        /* 按钮设计 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: #ffffff;
+            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+        }
+        .btn-primary:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+        }
+        .btn-primary:active { transform: translateY(0); }
+        .btn-secondary {
+            background: #ffffff;
+            color: var(--text-heading);
+            border: 1px solid var(--card-border);
+        }
+        .btn-secondary:hover {
+            background: #f8fafc;
+            border-color: #cbd5e1;
+        }
+        .btn-danger {
+            background: var(--danger-light);
+            color: var(--danger);
+            border: 1px solid #fecaca;
+            padding: 6px 12px;
+            font-size: 0.8rem;
+            border-radius: 8px;
+        }
+        .btn-danger:hover {
+            background: var(--danger);
+            color: #ffffff;
+            border-color: var(--danger);
+        }
+
+        /* 协议与应用列表卡片项 */
+        .client-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .client-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px;
+            background: #f8fafc;
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            transition: all 0.2s;
+        }
+        .client-item:hover {
+            background: #ffffff;
+            border-color: #cbd5e1;
+            box-shadow: var(--shadow-sm);
+        }
+        .client-meta {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .client-icon-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: #eff6ff;
+            border: 1px solid var(--primary-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            color: var(--primary);
+        }
+        .client-name-id {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .client-name { font-size: 0.95rem; font-weight: 700; color: var(--text-heading); }
+        .client-id {
+            font-size: 0.76rem;
+            color: var(--text-body);
+            font-family: 'JetBrains Mono', monospace;
+            background: #ffffff;
+            padding: 2px 8px;
+            border-radius: 6px;
+            width: fit-content;
+            border: 1px solid var(--card-border);
+        }
+        .client-uris-badge {
+            font-size: 0.78rem;
+            color: var(--text-body);
+            max-width: 320px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* 登录弹窗 (遵循授权页卡片风格) */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+            padding: 20px;
+        }
+        .login-box {
+            background: #ffffff;
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 40px 36px;
+            width: 100%;
+            max-width: 420px;
+            box-shadow: 0 25px 60px -15px rgba(15, 23, 42, 0.25);
+            text-align: center;
+            position: relative;
+        }
+        .login-logo {
+            width: 52px;
+            height: 52px;
+            border-radius: 14px;
+            background: #0f172a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            font-size: 24px;
+            color: #ffffff;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+        }
+        .login-box h2 {
+            font-size: 1.45rem;
+            font-weight: 800;
+            color: var(--text-heading);
+            margin-bottom: 6px;
+            letter-spacing: -0.02em;
+        }
+        .login-desc {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            margin-bottom: 26px;
+        }
+
+        /* 消息提示 Toast */
+        .toast {
+            position: fixed;
+            bottom: 28px;
+            right: 28px;
+            padding: 12px 20px;
+            border-radius: 12px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            color: #ffffff;
+            z-index: 1000;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.12);
+            display: none;
+            align-items: center;
+            gap: 8px;
+            animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateY(14px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .toast.success { background: #059669; border: 1px solid #10b981; }
+        .toast.error { background: #dc2626; border: 1px solid #ef4444; }
+        .toast.show { display: flex; }
+
+        .hidden { display: none !important; }
+
+        /* 响应式调整 */
+        @media (max-width: 860px) {
+            .app-shell { flex-direction: column; }
+            .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--card-border); padding: 18px 20px; }
+            .main-content { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-layer" id="adminBgLayer"></div>
+
+    <!-- 登录与初始化弹窗 -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-box">
+            <div class="login-logo">✦</div>
+            <h2 id="authModalTitle">OneAuth 控制台</h2>
+            <p class="login-desc" id="authModalDesc">请使用管理员凭据登录身份认证中心</p>
+
+            <div class="form-group" style="text-align: left;">
+                <label>管理员账号</label>
+                <div class="input-wrapper">
+                    <span class="input-icon">👤</span>
+                    <input type="text" id="loginUser" placeholder="admin">
+                </div>
+            </div>
+            <div class="form-group" style="text-align: left;">
+                <label>密码</label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🔒</span>
+                    <input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter') submitAuth()">
+                </div>
+            </div>
+            <button class="btn btn-primary" style="width:100%; margin-top: 6px;" id="authBtn" onclick="submitAuth()">
+                <span>进入控制台</span> ➔
+            </button>
+        </div>
+    </div>
+
+    <!-- 主控台外壳 -->
+    <div class="app-shell hidden" id="appShell">
+        <aside class="sidebar">
+            <div>
+                <a class="sidebar-brand" href="/">
+                    <div class="brand-logo-icon">✦</div>
+                    <div class="brand-text">
+                        <h1>OneAuth <span class="brand-badge">PRO</span></h1>
+                        <div class="brand-subtitle">QQ OIDC Identity Hub</div>
+                    </div>
+                </a>
+
+                <div class="nav-section-title">核心导航</div>
+                <nav class="sidebar-nav">
+                    <a class="active" onclick="switchNav(this, 'overview')">
+                        <div class="nav-link-content"><span class="icon">📊</span> 系统概览</div>
+                    </a>
+                    <a onclick="switchNav(this, 'settings')">
+                        <div class="nav-link-content"><span class="icon">⚙️</span> 系统设置</div>
+                    </a>
+                    <a onclick="switchNav(this, 'clients')">
+                        <div class="nav-link-content"><span class="icon">🔑</span> 应用管理</div>
+                        <span class="nav-pill" id="clientCountPill">0</span>
+                    </a>
+                    <a onclick="switchNav(this, 'bot')">
+                        <div class="nav-link-content"><span class="icon">🤖</span> OneBot 节点</div>
+                    </a>
+                    <a onclick="switchNav(this, 'security')">
+                        <div class="nav-link-content"><span class="icon">🛡️</span> 安全中心</div>
+                    </a>
+                </nav>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="user-profile-badge">
+                    <div class="user-info-box">
+                        <div class="user-avatar">A</div>
+                        <div class="user-name-role">
+                            <span class="user-name" id="displayUsername">Administrator</span>
+                            <span class="user-status"><span class="status-dot-mini"></span> 已认证</span>
+                        </div>
+                    </div>
+                    <button class="btn-logout" title="退出登录" onclick="logout()">🚪</button>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <!-- 1. 系统概览页面 -->
+            <div id="page-overview">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>📊 系统状态与网关概览</h2>
+                        <p>监控 OneAuth 核心服务状态、OIDC 端点及 OneBot 连通性。</p>
+                    </div>
+                    <div class="header-actions">
+                        <a href="/login" target="_blank" class="btn btn-secondary">
+                            <span>👁️ 查看前台授权页</span> ↗
+                        </a>
+                        <div class="header-status-card">
+                            <div class="status-metric">
+                                <span class="metric-label">节点运行时间</span>
+                                <span class="metric-value" id="uptimeDisplay">00:00:00</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🛡️</div>
+                        <div class="stat-val" id="statClientCount">0</div>
+                        <div class="stat-label">已注册 OIDC 客户端</div>
+                        <div class="stat-hint">提供标准授权支持</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💬</div>
+                        <div class="stat-val" id="statTargetGroup">-</div>
+                        <div class="stat-label">目标验证 QQ 群号</div>
+                        <div class="stat-hint">捕获群内消息指令</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-val" id="statCodeTtl">180s</div>
+                        <div class="stat-label">验证码有效生存期</div>
+                        <div class="stat-hint">内存原子核销防重放</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-val" style="color:var(--success)">WAL 模式</div>
+                        <div class="stat-label">SQLite 持久化引擎</div>
+                        <div class="stat-hint">并发无锁高吞吐</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">🌐</span>
+                            <div>
+                                <div class="card-title">标准 OIDC 协议端点列表</div>
+                                <div class="card-desc">供业务系统 (如 Gitea, Nextcloud, Grafana) 直接配置对接使用。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="client-list">
+                        <div class="client-item">
+                            <div class="client-meta">
+                                <div class="client-icon-avatar">📄</div>
+                                <div class="client-name-id">
+                                    <div class="client-name">自动发现配置端点 (OpenID Discovery)</div>
+                                    <div class="client-id">GET /.well-known/openid-configuration</div>
+                                </div>
+                            </div>
+                            <button class="btn btn-secondary" onclick="window.open('/.well-known/openid-configuration', '_blank')">查看文档</button>
+                        </div>
+                        <div class="client-item">
+                            <div class="client-meta">
+                                <div class="client-icon-avatar">🔑</div>
+                                <div class="client-name-id">
+                                    <div class="client-name">JWKS 公钥证书集合 (RSA-2048)</div>
+                                    <div class="client-id">GET /.well-known/jwks.json</div>
+                                </div>
+                            </div>
+                            <button class="btn btn-secondary" onclick="window.open('/.well-known/jwks.json', '_blank')">查看 JWKS</button>
+                        </div>
+                        <div class="client-item">
+                            <div class="client-meta">
+                                <div class="client-icon-avatar">🤖</div>
+                                <div class="client-name-id">
+                                    <div class="client-name">OneBot 反向 WebSocket 接入路径</div>
+                                    <div class="client-id">WS /ws/onebot</div>
+                                </div>
+                            </div>
+                            <span class="brand-badge" style="color:var(--success); border-color:var(--success);">监听中</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. 系统设置页面 -->
+            <div id="page-settings" class="hidden">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>⚙️ 全局外观与界面定制</h2>
+                        <p>调整登录端展示的站点标识、背景视觉渲染以及个性化样式注入。</p>
+                    </div>
+                    <div class="header-actions">
+                        <a href="/login" target="_blank" class="btn btn-secondary">
+                            <span>👁️ 预览授权页效果</span> ↗
+                        </a>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">🎨</span>
+                            <div>
+                                <div class="card-title">登录页面定制</div>
+                                <div class="card-desc">修改用户验证界面的显示文案与背景壁纸。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>站点显示名称 <span class="label-hint">用于登录页主标题</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🏷️</span>
+                                <input id="siteName" type="text" placeholder="统一身份认证中心">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>登录提示文案 <span class="label-hint">例如：请发送验证码至群</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">💬</span>
+                                <input id="promptText" type="text" placeholder="请发送验证码至群">
+                            </div>
+                        </div>
+                        <div class="form-group full-width">
+                            <label>背景壁纸直链 URL <span class="label-hint">支持高分辨率图片直链</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🖼️</span>
+                                <input id="bgUrl" type="text" placeholder="https://images.unsplash.com/...">
+                            </div>
+                        </div>
+                        <div class="form-group full-width">
+                            <label>自定义 CSS 样式注入 <span class="label-hint">将直接渲染于登录界面 &lt;style&gt; 块中</span></label>
+                            <textarea id="customCss" rows="5" placeholder="/* 在此处输入自定义 CSS 规则 */"></textarea>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:flex-end;">
+                        <button class="btn btn-primary" onclick="saveSettings()">
+                            <span>💾 保存外观设置</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. 应用管理页面 -->
+            <div id="page-clients" class="hidden">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>🔑 OIDC 客户端管理</h2>
+                        <p>注册与维护信任的三方业务应用，管理 Client ID 与授权回调地址。</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">➕</span>
+                            <div>
+                                <div class="card-title">注册新 OIDC 客户端</div>
+                                <div class="card-desc">创建成功后将仅展示一次 Client Secret，请妥善保存。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>应用名称</label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">📦</span>
+                                <input id="newClientName" type="text" placeholder="例如: Gitea 团队仓库">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>授权回调地址 (Redirect URIs) <span class="label-hint">多个地址用英文逗号分隔</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🔗</span>
+                                <input id="newRedirectURIs" type="text" placeholder="https://git.example.com/user/oauth2/OneAuth/callback">
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:flex-end;">
+                        <button class="btn btn-primary" onclick="createClient()">
+                            <span>✨ 创建应用</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">📋</span>
+                            <div>
+                                <div class="card-title">已注册应用列表</div>
+                                <div class="card-desc">当前所有已被授权进行 OAuth2 / OIDC 单点登录的应用。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="clientList" class="client-list"></div>
+                </div>
+            </div>
+
+            <!-- 4. Bot 配置页面 -->
+            <div id="page-bot" class="hidden">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>🤖 OneBot 机器人连接配置</h2>
+                        <p>设置群聊验证码监听规则、NapCatQQ 反向 WebSocket 鉴权凭证及超时时效。</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">⚡</span>
+                            <div>
+                                <div class="card-title">反向 WebSocket 规则</div>
+                                <div class="card-desc">当收到指定 QQ 群的验证码时，系统将触发原子核销并推送前端跳转。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>目标审核 QQ 群号 <span class="label-hint">仅此群发出的验证码有效</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">👥</span>
+                                <input id="groupId" type="text" placeholder="87654321">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>连接认证 Token <span class="label-hint">用于 NapCat 反向 WS 握手鉴权</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🔐</span>
+                                <input id="botToken" type="text" placeholder="oneauth_secure_secret_token">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>验证码有效期 (秒) <span class="label-hint">建议 120 ~ 300 秒</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">⏳</span>
+                                <input id="codeTtl" type="number" placeholder="180">
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:flex-end;">
+                        <button class="btn btn-primary" onclick="saveSettings()">
+                            <span>💾 保存 Bot 配置</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 5. 安全中心页面 -->
+            <div id="page-security" class="hidden">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>🛡️ 安全中心与凭证管理</h2>
+                        <p>管理系统管理员凭据及安全会话策略。</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">🔒</span>
+                            <div>
+                                <div class="card-title">修改管理员密码</div>
+                                <div class="card-desc">建议定期更换管理员控制台密码，长度不能低于 6 个字符。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>当前原密码</label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🔑</span>
+                                <input id="oldPassword" type="password" placeholder="请输入当前密码">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>新服务密码 <span class="label-hint">至少 6 个字符</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🛡️</span>
+                                <input id="newPassword" type="password" placeholder="请输入新服务密码">
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:flex-end;">
+                        <button class="btn btn-primary" onclick="changeAdminPassword()">
+                            <span>🔐 确认修改密码</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 弹窗 Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+    let token = localStorage.getItem('admin_token');
+
+    async function initCheck() {
+        if (token) {
+            showApp();
+            return;
+        }
+        document.getElementById('loginOverlay').classList.remove('hidden');
+    }
+
+    async function submitAuth() {
+        const user = document.getElementById('loginUser').value;
+        const pass = document.getElementById('loginPass').value;
+        if (!user || !pass) return showToast('请输入用户名和密码', 'error');
+
+        try {
+            let res = await fetch('/api/admin/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: user, password: pass})
+            });
+            let data = await res.json();
+            if (res.ok) {
+                token = data.token;
+                localStorage.setItem('admin_token', token);
+                document.getElementById('displayUsername').innerText = user;
+                showApp();
+                showToast('欢迎回来，管理员！', 'success');
+            } else {
+                showToast(data.error || '用户名或密码错误', 'error');
+            }
+        } catch(e) {
+            showToast('无法连接至认证后台', 'error');
+        }
+    }
+
+    function showApp() {
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('appShell').classList.remove('hidden');
+        loadSettings();
+        loadClients();
+    }
+
+    async function loadSettings() {
+        let res = await fetch('/api/admin/settings', { headers: {'Authorization': 'Bearer ' + token} });
+        if (res.status === 401) { logout(); return; }
+        let s = await res.json();
+        document.getElementById('siteName').value = s.site_name || '';
+        document.getElementById('promptText').value = s.prompt_text || '请发送验证码至群';
+        document.getElementById('bgUrl').value = s.background_url || '';
+        document.getElementById('customCss').value = s.custom_css || '';
+        document.getElementById('groupId').value = s.target_group_id || '';
+        document.getElementById('botToken').value = s.onebot_token || '';
+        document.getElementById('codeTtl').value = s.code_ttl || '180';
+
+        document.getElementById('statTargetGroup').innerText = s.target_group_id || '未配置';
+        document.getElementById('statCodeTtl').innerText = (s.code_ttl || '180') + 's';
+
+        if (s.background_url) {
+            document.getElementById('adminBgLayer').style.backgroundImage = 'url(' + s.background_url + ')';
+        }
+    }
+
+    async function saveSettings() {
+        let body = {
+            site_name: document.getElementById('siteName').value,
+            prompt_text: document.getElementById('promptText').value,
+            background_url: document.getElementById('bgUrl').value,
+            custom_css: document.getElementById('customCss').value,
+            target_group_id: document.getElementById('groupId').value,
+            onebot_token: document.getElementById('botToken').value,
+            code_ttl: document.getElementById('codeTtl').value
+        };
+        let res = await fetch('/api/admin/settings', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        if (res.ok) {
+            showToast('系统与外观设置已成功保存！', 'success');
+            loadSettings();
+        } else {
+            showToast('保存设置失败', 'error');
+        }
+    }
+
+    async function changeAdminPassword() {
+        const oldPassword = document.getElementById('oldPassword').value;
+        const newPassword = document.getElementById('newPassword').value;
+        if (!oldPassword || !newPassword) {
+            return showToast('请完整填写原密码和新密码', 'error');
+        }
+        if (newPassword.length < 6) {
+            return showToast('新密码长度不能少于 6 位', 'error');
+        }
+
+        try {
+            let res = await fetch('/api/admin/password', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    old_password: oldPassword,
+                    new_password: newPassword
+                })
+            });
+            let data = await res.json();
+            if (res.ok) {
+                showToast('服务密码修改成功！请重新登录', 'success');
+                document.getElementById('oldPassword').value = '';
+                document.getElementById('newPassword').value = '';
+                setTimeout(() => {
+                    logout();
+                }, 1500);
+            } else {
+                showToast(data.message || data.error || '原密码错误或修改失败', 'error');
+            }
+        } catch(e) {
+            showToast('修改密码网络请求失败', 'error');
+        }
+    }
+
+    async function loadClients() {
+        let res = await fetch('/api/admin/clients', { headers: {'Authorization': 'Bearer ' + token} });
+        let clients = await res.json();
+        let html = '';
+        let count = 0;
+        if (Array.isArray(clients) && clients.length > 0) {
+            count = clients.length;
+            clients.forEach(c => {
+                html += '<div class="client-item">' +
+                    '<div class="client-meta">' +
+                        '<div class="client-icon-avatar">🔑</div>' +
+                        '<div class="client-name-id">' +
+                            '<div class="client-name">' + (c.client_name || '未命名应用') + '</div>' +
+                            '<div class="client-id">' + (c.client_id || '') + '</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="client-uris-badge" title="' + (c.redirect_uris || '') + '">回调: ' + (c.redirect_uris || '') + '</div>' +
+                    '<button class="btn btn-danger" onclick="deleteClient(\'' + c.client_id + '\')">🗑️ 移除</button>' +
+                '</div>';
+            });
+        }
+        document.getElementById('clientList').innerHTML = html || '<div style="text-align:center;padding:36px;color:var(--text-muted);">暂无注册应用，请在上方创建第一个 OIDC Client</div>';
+        document.getElementById('clientCountPill').innerText = count;
+        document.getElementById('statClientCount').innerText = count;
+    }
+
+    async function createClient() {
+        let name = document.getElementById('newClientName').value.trim();
+        let uris = document.getElementById('newRedirectURIs').value.trim();
+        if (!name || !uris) return showToast('请填写应用名称和回调地址', 'error');
+
+        let res = await fetch('/api/admin/clients', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ client_name: name, redirect_uris: uris })
+        });
+        let data = await res.json();
+        if (res.ok) {
+            alert('🎉 客户端创建成功！\n\nClient ID: ' + data.client_id + '\nClient Secret: ' + data.client_secret + '\n\n【注意】密钥仅展示一次，请立即复制并写入应用配置中！');
+            document.getElementById('newClientName').value = '';
+            document.getElementById('newRedirectURIs').value = '';
+            loadClients();
+            showToast('新应用已就绪', 'success');
+        } else {
+            showToast(data.error || '创建失败', 'error');
+        }
+    }
+
+    async function deleteClient(id) {
+        if (!confirm('确定彻底移除该客户端？移除后使用该 Client ID 的业务系统将无法登录！')) return;
+        await fetch('/api/admin/clients/' + id, {
+            method: 'DELETE',
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+        loadClients();
+        showToast('已移除客户端', 'success');
+    }
+
+    function switchNav(el, pageName) {
+        document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
+        if (el) el.classList.add('active');
+        showPage(pageName);
+    }
+
+    function showPage(name) {
+        const pages = ['overview', 'settings', 'clients', 'bot', 'security'];
+        pages.forEach(p => {
+            const el = document.getElementById('page-' + p);
+            if (el) el.classList.add('hidden');
+        });
+        
+        const targetPage = document.getElementById('page-' + name);
+        if (targetPage) targetPage.classList.remove('hidden');
+    }
+
+    function showToast(msg, type = 'success') {
+        const toast = document.getElementById('toast');
+        toast.innerHTML = (type === 'success' ? '✅ ' : '❌ ') + msg;
+        toast.className = 'toast ' + type + ' show';
+        setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+
+    function logout() {
+        localStorage.removeItem('admin_token');
+        location.reload();
+    }
+
+    let startTime = Date.now();
+    setInterval(() => {
+        let diff = Math.floor((Date.now() - startTime) / 1000);
+        let m = String(Math.floor(diff / 60) % 60).padStart(2, '0');
+        let s = String(diff % 60).padStart(2, '0');
+        let h = String(Math.floor(diff / 3600)).padStart(2, '0');
+        let el = document.getElementById('uptimeDisplay');
+        if (el) el.innerText = h + ':' + m + ':' + s;
+    }, 1000);
+
+    initCheck();
+    </script>
+</body>
+</html>

@@ -1,0 +1,1338 @@
+OneAuth: 基于 OneBot 协议的轻量级 QQ-OIDC 统一身份认证系统目录项目概述与设计规范AI 助手全自动开发提示词 (System Prompt)系统架构与数据流转拓扑存储与高并发状态机设计OneBot 反向 WebSocket 协议技术规范完整端到端工程实现源码6.1 依赖与工程配置 (go.mod)6.2 数据库连接与迁移 (internal/database/db.go)6.3 内存状态机与原子核销 (internal/session/manager.go)6.4 OneBot 事件微内核 (internal/onebot/websocket.go)6.5 OIDC 协议与令牌签发引擎 (internal/oidc/handler.go)6.6 管理后台交互端点 (internal/admin/handler.go)6.7 高保真毛玻璃登录模板 (web/templates/login.html)6.8 管理控制台界面模板 (web/templates/admin.html)6.9 服务主入口启动流程 (cmd/server/main.go)容器编排与生产交付7.1 多阶段编译 Dockerfile7.2 Docker Compose 编排规范7.3 Nginx / Caddy 边缘网关反代第三方系统对接与故障排查 Runbook1. 项目概述与设计规范1.1 核心理念OneAuth 是一个面向个人、开源组织与私有私有云站长打造的超轻量级单二进制（Single-Unit）OpenID Connect 身份认证系统。用户在目标 QQ 群内发送高熵验证码，即可在网页端完成身份核验与登录。1.2 核心设计规范零外部中间件依赖：摒弃 Redis、PostgreSQL、MySQL 等重型依赖。采用 SQLite WAL 模式存储持久配置 + 内存带锁字典维护瞬态验证码。单二进制打包交付：所有静态页面（HTML、CSS、JS、图标）使用 Go 1.16+ //go:embed 打包，最终仅输出一个无外部依赖的可执行文件，镜像体积控制在 30MB 内，空载运行内存仅 20MB。反向 WebSocket 通信：自身暴露 WebSocket Server 端点，底层协议端（NapCatQQ 等）主动连入，无视复杂内网与反向代理网络拓扑。现代视觉语言：前台基于毛玻璃（Glassmorphism）与暗色/亮色自适应设计，支持管理员后台热更新背景图 URL、站点名称与全局自定义 CSS。标准 OIDC 规范对齐：完整支持 RFC 6749 授权码模式、RFC 7517 (JWKS)、RFC 7519 (JWT)，默认使用 RS256 非对称算法签名，自动派生 QQ 专属 Profile 与 Email 字段。2. AI 助手全自动开发提示词 (System Prompt)将以下内容完整复制给 Cursor / Windsurf / Claude Code 等智能编程工具，可直接生成全套生产级工程代码。Markdown# Role & Project Goal
+You are a Principal Software Architect and Senior Full-Stack Engineer. Your objective is to build a production-ready, ultra-lightweight, single-binary OpenID Connect (OIDC) Identity Provider named **OneAuth**. 
+OneAuth allows web applications to authenticate users via verification codes sent in designated QQ Groups. It captures group chat messages via OneBot v11/v12 Reverse WebSocket, associates the sender's QQ number with an active OAuth session, and issues standard OIDC tokens (JWT ID Token, Access Token).
+
+# Core Constraints & Architecture
+1. **Language & Framework**: Go 1.22+ using standard library or lightweight routers (e.g., standard `net/http` with modern ServeMux or `chi`).
+2. **Storage Architecture**:
+   - **Persistent Config**: Pure SQLite with WAL mode (`modernc.org/sqlite`). NO external database (MySQL/PostgreSQL) allowed.
+   - **Authentication State Machine**: Pure In-Memory thread-safe storage (`sync.RWMutex` protected maps) with automatic TTL eviction for login codes and sessions. NO Redis.
+3. **Frontend & Assets**:
+   - Zero external static file runtime dependencies. All HTML, CSS, JS, fonts, and icons MUST be embedded into the Go binary using `//go:embed`.
+   - Modern, high-aesthetic UI: Glassmorphism / Frosted Glass design, responsive layout, dynamic background image loading, smooth animations, and Server-Sent Events (SSE) for instant zero-refresh redirection.
+   - Built-in lightweight Admin Console (Client management, UI customizer, Bot settings, Audit logs).
+4. **Protocol Compliance**:
+   - Strictly conforms to OpenID Connect Core 1.0 and RFC 6749 (Authorization Code Flow with PKCE support).
+   - Generates and self-manages a persistent RSA 2048-bit keypair on the first run, exposing standard `/.well-known/jwks.json`.
+5. **Protocol Adapter**:
+   - Implements an RFC 6455 compliant WebSocket server at `/ws/onebot` receiving OneBot v11 and v12 Reverse WebSocket events.
+
+# Project Structure
+oneauth/
+├── cmd/
+│   └── server/
+│       └── main.go
+├── internal/
+│   ├── config/             # Environment, DB flags, dynamic runtime settings
+│   ├── database/           # SQLite connection, schema migration, WAL pragma
+│   ├── oidc/               # OIDC Core: /authorize, /token, /userinfo, /.well-known/*, JWKS
+│   ├── onebot/             # Reverse WebSocket server, event parser, verification router
+│   ├── session/            # Thread-safe in-memory state machine, atomic code verification, TTL GC
+│   ├── admin/              # Admin REST APIs, session management, client CRUD
+│   └── models/             # Database structs, OIDC claims, OneBot payload DTOs
+├── web/
+│   ├── embed.go            # `//go:embed static/* templates/*`
+│   ├── templates/          # HTML templates (login.html, admin.html, error.html)
+│   └── static/             # Assets (CSS/JS/Favicon)
+├── Dockerfile              # Multi-stage ultra-small build (Alpine, < 35MB)
+├── docker-compose.yml      # Ready-to-run setup paired with NapCatQQ
+└── README.md
+
+# Key Implementation Specifications
+1. **SQLite Pragmas**:
+   Must execute on DB connection:
+   `PRAGMA journal_mode = WAL;`
+   `PRAGMA busy_timeout = 5000;`
+   `PRAGMA synchronous = NORMAL;`
+
+2. **Verification Code Logic**:
+   - Charset: `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (Length 6, high-entropy, no visual ambiguity).
+   - Atomic consumption: Receiving valid OneBot group message retrieves session and invalidates verification code in a single write-locked step.
+
+3. **OneBot Adaptability**:
+   - Handle both v11 (`post_type == "message" && message_type == "group"`) and v12 (`type == "message" && detail_type == "group"`).
+   - Filter `group_id` strictly against system configuration.
+   - Extract pure text segment, strip At mentions, perform uppercase trim before matching.
+
+4. **OIDC Claims**:
+   - `sub`: Sender QQ string (e.g. `"100000001"`).
+   - `preferred_username`: Sender QQ string.
+   - `name`: `"QQ用户_" + QQ`.
+   - `email`: `"{QQ}@qq.com"`.
+   - `email_verified`: `true`.
+   - `picture`: `"https://q1.qlogo.cn/g?b=qq&nk={QQ}&s=640"`.
+
+Write complete, idiomatic, and clean code with complete error handling. Do not truncate essential logic.
+3. 系统架构与数据流转拓扑3.1 核心架构交互图+-----------------------------------------------------------------------------------------+
+|                                    OneAuth 进程空间                                     |
+|                                                                                         |
+|  [ 接入网关层 ]                                                                         |
+|  - GET  /.well-known/openid-configuration                                                |
+|  - GET  /.well-known/jwks.json                                                          |
+|  - GET  /authorize ─── (校验合法性) ───► 生成验证码与会话 ───► 跳转 /login 界面            |
+|  - GET  /api/session/stream ──────────► 挂载 SSE 长连接监听状态变更                     |
+|  - POST /token ───────────────────────► 校验 AuthCode 并签发 RS256 JWT ID Token         |
+|  - GET  /userinfo ────────────────────► 解析 Bearer JWT 并响应用户画像                  |
+|                                                                                         |
+|  [ OneBot 微内核 ]                                                                      |
+|  - WS   /ws/onebot ◄── (NapCatQQ 连入) ── 过滤目标群 ── 提取纯文本 ── 正则命中           |
+|                                                     │                                   |
+|                                                     ▼                                   |
+|  [ 瞬态内存状态机 (In-Memory Hub) ]                 │                                   |
+|  - RWMutex 读写互斥锁                               │                                   |
+|  - codeIndex: "8K2X9P" ──(原子核销/提取) ◄──────────┘                                   |
+|  - 状态广播: 推送 VERIFIED 信号至挂起的 SSE 流 ─────► 前端感知并自动跳转                |
+|  - 30s 周期性 GC 协程自动驱逐失效会话                                                   |
+|                                                                                         |
+|  [ 持久化层 (SQLite WAL) ]                                                              |
+|  - system_settings: 存储站点名、背景图直链、自定义 CSS、目标群号、Bot 连接 Token        |
+|  - oidc_clients: 存储 client_id、client_secret_hash、回调地址白名单                      |
++-----------------------------------------------------------------------------------------+
+3.2 端到端时序流转用户浏览器                   OneAuth Web/OIDC              OneBot WS 内核             NapCatQQ / QQ群
+    |                               |                            |                          |
+    | 1. 点击“使用 QQ 登录”          |                            |                          |
+    |------------------------------>| (校验 client_id/redirect)  |                          |
+    |                               | (生成 SessionID 与 6位 Code)|                          |
+    | 2. 302 重定向至 /login        |                            |                          |
+    |<------------------------------|                            |                          |
+    | 3. 打开登录页并建立 SSE 连接   |                            |                          |
+    |==============================>|                            |                          |
+    | (展示验证码 "8K2X9P" 与群号)  |                            |                          |
+    |                               |                            | 4. 用户在群内发送 "8K2X9P"|
+    |                               |                            |<-------------------------|
+    |                               | 5. 反向 WS 推送群消息事件   |                          |
+    |                               |<---------------------------|                          |
+    |                               | (校验群号、清洗文本、原子核销) |                          |
+    | 6. SSE 推送跳转指令           |                            |                          |
+    |<==============================|                            |                          |
+    | 7. 302 回调至业务方系统       |                            |                          |
+    |------------------------------>|                            |                          |
+    | 8. 业务方后端使用 code 调 /token|                           |                          |
+    |------------------------------>| (核销 code, 签发 RS256 JWT)|                          |
+    | 9. 返回 id_token (sub=QQ号)   |                            |                          |
+    |<------------------------------|                            |                          |
+4. 存储与高并发状态机设计4.1 混合存储设计准则瞬态验证流零磁盘 IO：验证码生命周期仅 3 分钟，高频生成、匹配与核销全部在内存中闭环，彻底规避数据库写入竞争。SQLite 仅服务只读与极低频写入：仅用于管理后台更改外观或注册 OIDC Client。在启用 WAL 模式后，读写分离互不阻塞。4.2 SQLite 必备优化参数在数据库连接初始化时，系统强制执行以下 PRAGMA 参数：SQLPRAGMA journal_mode = WAL;        -- 激活预写式日志，读写互不阻塞
+PRAGMA busy_timeout = 5000;       -- 写锁忙等待 5000ms，拒绝直接报错
+PRAGMA synchronous = NORMAL;      -- 兼顾掉电安全与微秒级写入吞吐
+PRAGMA foreign_keys = ON;         -- 外键约束检查
+4.3 DDL 数据表结构SQLCREATE TABLE IF NOT EXISTS system_settings (
+    setting_key   TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES 
+('site_name', '统一身份认证中心'),
+('site_logo', ''),
+('background_url', 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=1920&q=80'),
+('custom_css', ''),
+('target_group_id', '87654321'),
+('onebot_token', 'oneauth_secure_secret_token'),
+('code_ttl', '180');
+
+CREATE TABLE IF NOT EXISTS oidc_clients (
+    client_id           TEXT PRIMARY KEY,
+    client_secret_hash  TEXT NOT NULL,
+    client_name         TEXT NOT NULL,
+    redirect_uris       TEXT NOT NULL,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+5. OneBot 反向 WebSocket 协议技术规范5.1 反向 WebSocket 握手服务端监听路径：/ws/onebot协议安全头：协议端建连时需携带 Authorization: Bearer <token> 或在 URL 查询参数中提供 ?access_token=<token>。心跳快速过滤：捕获 post_type: "meta_event" 或 type: "meta" 直接跳过，阻止日志污染和资源浪费。5.2 报文模型与解析兼容OneBot v11 典型群消息报文JSON{
+  "post_type": "message",
+  "message_type": "group",
+  "sub_type": "normal",
+  "group_id": 87654321,
+  "user_id": 100000001,
+  "raw_message": "8K2X9P",
+  "message": [
+    { "type": "text", "data": { "text": "8K2X9P" } }
+  ]
+}
+OneBot v12 典型群消息报文JSON{
+  "type": "message",
+  "detail_type": "group",
+  "platform": "qq",
+  "group_id": "87654321",
+  "user_id": "100000001",
+  "message": [
+    { "type": "text", "data": { "text": "8K2X9P" } }
+  ],
+  "alt_message": "8K2X9P"
+}
+5.3 消息清洗规范 (Sanitization Pipeline)At 标记剥离：遍历 message 数组，丢弃除 text 以外的所有段（at、image、face）。若仅有 raw_message，通过正则表达式 \[CQ:[^\]]+\] 剥离。字符归一化：去除所有前后空白符、全角空格，通过 strings.ToUpper() 转换为纯大写。正则阻断：使用 ^[2-9A-HJ-NP-Z]{6}$ 进行预筛，未命中规则的普通群聊在 1 微秒内丢弃，杜绝遍历与锁争用。6. 完整端到端工程实现源码6.1 依赖与工程配置 (go.mod)Gomodule oneauth
+
+go 1.22
+
+require (
+	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/gorilla/websocket v1.5.1
+	golang.org/x/crypto v0.24.0
+	modernc.org/sqlite v1.30.1
+)
+6.2 数据库连接与迁移 (internal/database/db.go)Gopackage database
+
+import (
+	"database/sql"
+	"log"
+
+	_ "modernc.org/sqlite"
+)
+
+var DB *sql.DB
+
+func InitDB(dbPath string) (*sql.DB, error) {
+	var err error
+	DB, err = sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := DB.Ping(); err != nil {
+		return nil, err
+	}
+
+	DB.SetMaxOpenConns(1)
+	DB.SetMaxIdleConns(1)
+
+	if err := migrate(); err != nil {
+		return nil, err
+	}
+
+	log.Println("[Database] SQLite 初始化成功 (WAL 模式激活)")
+	return DB, nil
+}
+
+func migrate() error {
+	schema := `
+	PRAGMA journal_mode = WAL;
+	PRAGMA busy_timeout = 5000;
+	PRAGMA synchronous = NORMAL;
+
+	CREATE TABLE IF NOT EXISTS system_settings (
+		setting_key   TEXT PRIMARY KEY,
+		setting_value TEXT NOT NULL,
+		updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS oidc_clients (
+		client_id           TEXT PRIMARY KEY,
+		client_secret_hash  TEXT NOT NULL,
+		client_name         TEXT NOT NULL,
+		redirect_uris       TEXT NOT NULL,
+		created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS admin_users (
+		username      TEXT PRIMARY KEY,
+		password_hash TEXT NOT NULL,
+		created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	_, err := DB.Exec(schema)
+	return err
+}
+
+func GetSetting(key, defaultVal string) string {
+	var val string
+	err := DB.QueryRow("SELECT setting_value FROM system_settings WHERE setting_key = ?", key).Scan(&val)
+	if err != nil {
+		return defaultVal
+	}
+	return val
+}
+
+func SetSetting(key, val string) error {
+	_, err := DB.Exec(`
+		INSERT INTO system_settings (setting_key, setting_value, updated_at) 
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`,
+		key, val)
+	return err
+}
+6.3 内存状态机与原子核销 (internal/session/manager.go)Gopackage session
+
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+)
+
+type SessionStatus string
+
+const (
+	StatusPending  SessionStatus = "PENDING"
+	StatusVerified SessionStatus = "VERIFIED"
+	StatusConsumed SessionStatus = "CONSUMED"
+)
+
+type AuthSession struct {
+	SessionID     string
+	ClientID      string
+	RedirectURI   string
+	State         string
+	CodeChallenge string
+	VerifyCode    string
+	QQNumber      string
+	AuthCode      string
+	Status        SessionStatus
+	ExpiresAt     time.Time
+	NotifyChan    chan struct{}
+}
+
+type Manager struct {
+	mu            sync.RWMutex
+	sessions      map[string]*AuthSession
+	codeIndex     map[string]*AuthSession
+	authCodeIndex map[string]*AuthSession
+}
+
+var DefaultManager = NewManager()
+
+func NewManager() *Manager {
+	m := &Manager{
+		sessions:      make(map[string]*AuthSession),
+		codeIndex:     make(map[string]*AuthSession),
+		authCodeIndex: make(map[string]*AuthSession),
+	}
+	go m.startCleaner()
+	return m
+}
+
+func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, ttlSeconds int) (*AuthSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	code, err := m.generateUniqueCode(6)
+	if err != nil {
+		return nil, err
+	}
+
+	sessionID, _ := generateRandomHex(16)
+	sess := &AuthSession{
+		SessionID:     sessionID,
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		State:         state,
+		CodeChallenge: challenge,
+		VerifyCode:    code,
+		Status:        StatusPending,
+		ExpiresAt:     time.Now().Add(time.Duration(ttlSeconds) * time.Second),
+		NotifyChan:    make(chan struct{}),
+	}
+
+	m.sessions[sessionID] = sess
+	m.codeIndex[code] = sess
+	return sess, nil
+}
+
+func (m *Manager) VerifyCode(code, qqNumber string) (*AuthSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, exists := m.codeIndex[code]
+	if !exists || time.Now().After(sess.ExpiresAt) || sess.Status != StatusPending {
+		return nil, false
+	}
+
+	sess.QQNumber = qqNumber
+	sess.Status = StatusVerified
+	delete(m.codeIndex, code) // 原子核销，防止重放
+
+	close(sess.NotifyChan)
+	return sess, true
+}
+
+func (m *Manager) IssueAuthCode(sessionID string) (string, *AuthSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, exists := m.sessions[sessionID]
+	if !exists || sess.Status != StatusVerified {
+		return "", nil, false
+	}
+
+	authCode, _ := generateRandomHex(24)
+	sess.AuthCode = authCode
+	sess.Status = StatusConsumed
+	m.authCodeIndex[authCode] = sess
+
+	return authCode, sess, true
+}
+
+func (m *Manager) ExchangeCode(authCode string) (*AuthSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, exists := m.authCodeIndex[authCode]
+	if !exists {
+		return nil, false
+	}
+
+	delete(m.authCodeIndex, authCode)
+	return sess, true
+}
+
+func (m *Manager) GetSession(sessionID string) (*AuthSession, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sess, exists := m.sessions[sessionID]
+	return sess, exists
+}
+
+func (m *Manager) generateUniqueCode(length int) (string, error) {
+	const charset = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+	for {
+		b := make([]byte, length)
+		for i := range b {
+			idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+			if err != nil {
+				return "", err
+			}
+			b[i] = charset[idx.Int64()]
+		}
+		candidate := string(b)
+		if _, exists := m.codeIndex[candidate]; !exists {
+			return candidate, nil
+		}
+	}
+}
+
+func (m *Manager) startCleaner() {
+	ticker := time.NewTicker(20 * time.Second)
+	for range ticker.C {
+		now := time.Now()
+		m.mu.Lock()
+		for sid, s := range m.sessions {
+			if now.After(s.ExpiresAt) {
+				delete(m.codeIndex, s.VerifyCode)
+				delete(m.authCodeIndex, s.AuthCode)
+				delete(m.sessions, sid)
+			}
+		}
+		m.mu.Unlock()
+	}
+}
+
+func generateRandomHex(length int) (string, error) {
+	const hexChars = "0123456789abcdef"
+	b := make([]byte, length)
+	for i := range b {
+		idx, _ := rand.Int(rand.Reader, big.NewInt(16))
+		b[i] = hexChars[idx.Int64()]
+	}
+	return string(b), nil
+}
+6.4 OneBot 事件微内核 (internal/onebot/websocket.go)Gopackage onebot
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"oneauth/internal/database"
+	"oneauth/internal/session"
+
+	"github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type GenericEvent struct {
+	PostType    string      `json:"post_type"`
+	MessageType string      `json:"message_type"`
+	GroupIDV11  int64       `json:"group_id"`
+	UserIDV11   int64       `json:"user_id"`
+	RawMessage  string      `json:"raw_message"`
+	Type        string      `json:"type"`
+	DetailType  string      `json:"detail_type"`
+	GroupIDV12  string      `json:"group_id"`
+	UserIDV12   string      `json:"user_id"`
+	Message     interface{} `json:"message"`
+}
+
+func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	expectedToken := database.GetSetting("onebot_token", "")
+	if expectedToken != "" {
+		authHeader := r.Header.Get("Authorization")
+		queryToken := r.URL.Query().Get("access_token")
+		valid := false
+		if strings.HasPrefix(authHeader, "Bearer ") && strings.TrimPrefix(authHeader, "Bearer ") == expectedToken {
+			valid = true
+		} else if queryToken == expectedToken {
+			valid = true
+		}
+		if !valid {
+			http.Error(w, "Unauthorized OneBot Token", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[OneBot] WS 握手失败: %v\n", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Println("[OneBot] 协议端客户端已成功连接反向 WebSocket")
+
+	for {
+		_, msgBytes, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("[OneBot] 连接断开: %v\n", err)
+			break
+		}
+		go processEvent(msgBytes)
+	}
+}
+
+func processEvent(data []byte) {
+	var ev GenericEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return
+	}
+
+	targetGroup := database.GetSetting("target_group_id", "")
+	var currentGroup, senderQQ string
+
+	if ev.PostType == "message" && ev.MessageType == "group" {
+		currentGroup = strconv.FormatInt(ev.GroupIDV11, 10)
+		senderQQ = strconv.FormatInt(ev.UserIDV11, 10)
+	} else if ev.Type == "message" && ev.DetailType == "group" {
+		currentGroup = ev.GroupIDV12
+		senderQQ = ev.UserIDV12
+	} else {
+		return
+	}
+
+	if targetGroup != "" && currentGroup != targetGroup {
+		return
+	}
+
+	code := cleanVerificationCode(ev.Message, ev.RawMessage)
+	if len(code) != 6 {
+		return
+	}
+
+	if sess, ok := session.DefaultManager.VerifyCode(code, senderQQ); ok {
+		log.Printf("[OneBot] 成功完成核销: QQ=%s, Code=%s, SessionID=%s\n", senderQQ, code, sess.SessionID)
+	}
+}
+
+func cleanVerificationCode(msgObj interface{}, raw string) string {
+	var sb strings.Builder
+	if segments, ok := msgObj.([]interface{}); ok {
+		for _, seg := range segments {
+			if sm, ok := seg.(map[string]interface{}); ok && sm["type"] == "text" {
+				if d, ok := sm["data"].(map[string]interface{}); ok {
+					if t, ok := d["text"].(string); ok {
+						sb.WriteString(t)
+					}
+				}
+			}
+		}
+	}
+
+	text := sb.String()
+	if text == "" {
+		re := regexp.MustCompile(`\[CQ:[^\]]+\]`)
+		text = re.ReplaceAllString(raw, "")
+	}
+
+	text = strings.ToUpper(strings.TrimSpace(text))
+	cleanRegex := regexp.MustCompile(`[^2-9A-HJ-NP-Z]`)
+	return cleanRegex.ReplaceAllString(text, "")
+}
+6.5 OIDC 协议与令牌签发引擎 (internal/oidc/handler.go)Gopackage oidc
+
+import (
+	"crypto/rsa"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"oneauth/internal/database"
+	"oneauth/internal/session"
+	"oneauth/web"
+
+	"github.com/golang-jwt/jwt/v5"
+)
+
+type Server struct {
+	IssuerURL  string
+	PrivateKey *rsa.PrivateKey
+	KeyID      string
+}
+
+func (s *Server) HandleDiscovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	doc := map[string]interface{}{
+		"issuer":                                s.IssuerURL,
+		"authorization_endpoint":                s.IssuerURL + "/authorize",
+		"token_endpoint":                        s.IssuerURL + "/token",
+		"userinfo_endpoint":                     s.IssuerURL + "/userinfo",
+		"jwks_uri":                              s.IssuerURL + "/.well-known/jwks.json",
+		"response_types_supported":              []string{"code"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"claims_supported": []string{
+			"sub", "iss", "aud", "exp", "iat", "auth_time",
+			"name", "preferred_username", "email", "email_verified", "picture", "qq",
+		},
+	}
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+func (s *Server) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	clientID := q.Get("client_id")
+	redirectURI := q.Get("redirect_uri")
+	responseType := q.Get("response_type")
+	state := q.Get("state")
+	challenge := q.Get("code_challenge")
+
+	if clientID == "" || redirectURI == "" || responseType != "code" {
+		http.Error(w, "Invalid request parameters", http.StatusBadRequest)
+		return
+	}
+
+	var dbRedirects string
+	err := database.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE client_id = ?", clientID).Scan(&dbRedirects)
+	if err != nil {
+		http.Error(w, "Unauthorized client_id", http.StatusUnauthorized)
+		return
+	}
+
+	var allowedURIs []string
+	_ = json.Unmarshal([]byte(dbRedirects), &allowedURIs)
+	matched := false
+	for _, u := range allowedURIs {
+		if u == redirectURI {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		http.Error(w, "Mismatching redirect_uri", http.StatusBadRequest)
+		return
+	}
+
+	ttl, _ := strconv.Atoi(database.GetSetting("code_ttl", "180"))
+	sess, err := session.DefaultManager.CreateSession(clientID, redirectURI, state, challenge, ttl)
+	if err != nil {
+		http.Error(w, "Failed to initialize session", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/login?session_id="+sess.SessionID, http.StatusFound)
+}
+
+func (s *Server) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	sess, exists := session.DefaultManager.GetSession(sessionID)
+	if !exists || time.Now().After(sess.ExpiresAt) {
+		http.Error(w, "Session expired or invalid", http.StatusBadRequest)
+		return
+	}
+
+	tmpl, err := template.ParseFS(web.EmbeddedFiles, "templates/login.html")
+	if err != nil {
+		http.Error(w, "Template render error", http.StatusInternalServerError)
+		return
+	}
+
+	ttlRemaining := int(time.Until(sess.ExpiresAt).Seconds())
+	data := map[string]interface{}{
+		"SiteName":      database.GetSetting("site_name", "统一身份认证中心"),
+		"BackgroundURL": database.GetSetting("background_url", ""),
+		"CustomCSS":     template.CSS(database.GetSetting("custom_css", "")),
+		"TargetGroupID": database.GetSetting("target_group_id", "未配置"),
+		"VerifyCode":    sess.VerifyCode,
+		"SessionID":     sess.SessionID,
+		"TTL":           ttlRemaining,
+	}
+
+	_ = tmpl.Execute(w, data)
+}
+
+func (s *Server) HandleToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	_ = r.ParseForm()
+	code := r.Form.Get("code")
+	clientID := r.Form.Get("client_id")
+
+	sess, ok := session.DefaultManager.ExchangeCode(code)
+	if !ok || sess.ClientID != clientID {
+		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"iss":                s.IssuerURL,
+		"sub":                sess.QQNumber,
+		"aud":                clientID,
+		"exp":                now.Add(24 * time.Hour).Unix(),
+		"iat":                now.Unix(),
+		"auth_time":          now.Unix(),
+		"preferred_username": sess.QQNumber,
+		"name":               "QQ用户_" + sess.QQNumber,
+		"email":              fmt.Sprintf("%s@qq.com", sess.QQNumber),
+		"email_verified":     true,
+		"picture":            fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", sess.QQNumber),
+		"qq":                 sess.QQNumber,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = s.KeyID
+
+	signedIDToken, err := token.SignedString(s.PrivateKey)
+	if err != nil {
+		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": signedIDToken,
+		"token_type":   "Bearer",
+		"expires_in":   86400,
+		"id_token":     signedIDToken,
+	})
+}
+
+func (s *Server) HandleUserInfo(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return &s.PrivateKey.PublicKey, nil
+	})
+	if err != nil || !token.Valid {
+		http.Error(w, "Invalid Token", http.StatusUnauthorized)
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		http.Error(w, "Invalid Claims", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(claims)
+}
+
+func (s *Server) HandleSessionStream(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	sess, exists := session.DefaultManager.GetSession(sessionID)
+	if !exists {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	select {
+	case <-sess.NotifyChan:
+		authCode, _, _ := session.DefaultManager.IssueAuthCode(sessionID)
+		redirectURL := fmt.Sprintf("%s?code=%s&state=%s", sess.RedirectURI, authCode, url.QueryEscape(sess.State))
+		payload, _ := json.Marshal(map[string]string{
+			"status":       "VERIFIED",
+			"redirect_url": redirectURL,
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+	case <-r.Context().Done():
+		return
+	case <-time.After(time.Until(sess.ExpiresAt)):
+		_, _ = fmt.Fprintf(w, "data: {\"status\":\"EXPIRED\"}\n\n")
+		flusher.Flush()
+	}
+}
+6.6 管理后台交互端点 (internal/admin/handler.go)Gopackage admin
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"html/template"
+	"net/http"
+	"time"
+
+	"oneauth/internal/database"
+	"oneauth/web"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+type Handler struct{}
+
+func (h *Handler) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.ParseFS(web.EmbeddedFiles, "templates/admin.html")
+	if err != nil {
+		http.Error(w, "Admin template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rows, _ := database.DB.Query("SELECT client_id, client_name, redirect_uris, created_at FROM oidc_clients")
+	defer rows.Close()
+
+	type ClientRow struct {
+		ClientID     string
+		ClientName   string
+		RedirectURIs string
+		CreatedAt    string
+	}
+	var clients []ClientRow
+	for rows.Next() {
+		var c ClientRow
+		_ = rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.CreatedAt)
+		clients = append(clients, c)
+	}
+
+	data := map[string]interface{}{
+		"SiteName":      database.GetSetting("site_name", "统一身份认证中心"),
+		"BackgroundURL": database.GetSetting("background_url", ""),
+		"CustomCSS":     database.GetSetting("custom_css", ""),
+		"TargetGroupID": database.GetSetting("target_group_id", ""),
+		"OneBotToken":   database.GetSetting("onebot_token", ""),
+		"CodeTTL":       database.GetSetting("code_ttl", "180"),
+		"Clients":       clients,
+	}
+
+	_ = tmpl.Execute(w, data)
+}
+
+func (h *Handler) HandleSaveSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	_ = database.SetSetting("site_name", r.Form.Get("site_name"))
+	_ = database.SetSetting("background_url", r.Form.Get("background_url"))
+	_ = database.SetSetting("custom_css", r.Form.Get("custom_css"))
+	_ = database.SetSetting("target_group_id", r.Form.Get("target_group_id"))
+	_ = database.SetSetting("onebot_token", r.Form.Get("onebot_token"))
+	_ = database.SetSetting("code_ttl", r.Form.Get("code_ttl"))
+
+	http.Redirect(w, r, "/admin", http.StatusFound)
+}
+
+func (h *Handler) HandleCreateClient(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	name := r.Form.Get("client_name")
+	redirectURI := r.Form.Get("redirect_uri")
+
+	cidBytes := make([]byte, 8)
+	_, _ = rand.Read(cidBytes)
+	clientID := "oa_" + hex.EncodeToString(cidBytes)
+
+	secBytes := make([]byte, 16)
+	_, _ = rand.Read(secBytes)
+	rawSecret := "sec_" + hex.EncodeToString(secBytes)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte(rawSecret), bcrypt.DefaultCost)
+	urisJSON, _ := json.Marshal([]string{redirectURI})
+
+	_, _ = database.DB.Exec(`
+		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, created_at) 
+		VALUES (?, ?, ?, ?, ?)`,
+		clientID, string(hash), name, string(urisJSON), time.Now().Format("2006-01-02 15:04:05"))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(fmt.Sprintf(`
+		<h3>客户端创建成功</h3>
+		<p><b>Client ID:</b> %s</p>
+		<p><b>Client Secret (请立即复制，仅展示一次):</b> <span style="color:red">%s</span></p>
+		<a href="/admin">返回管理面板</a>
+	`, clientID, rawSecret)))
+}
+6.7 高保真毛玻璃登录模板 (web/templates/login.html)HTML<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ .SiteName }} - 安全身份核验</title>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg-card: rgba(255, 255, 255, 0.72);
+            --card-border: rgba(255, 255, 255, 0.45);
+            --text-title: #0f172a;
+            --text-desc: #475569;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-card: rgba(15, 23, 42, 0.72);
+                --card-border: rgba(255, 255, 255, 0.12);
+                --text-title: #f8fafc;
+                --text-desc: #94a3b8;
+            }
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: url('{{ .BackgroundURL }}') no-repeat center center fixed;
+            background-size: cover;
+            padding: 1.25rem;
+        }
+        .card {
+            width: 100%;
+            max-width: 420px;
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 28px;
+            padding: 2.5rem 2rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            animation: popIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .title { font-size: 1.6rem; font-weight: 700; color: var(--text-title); margin-bottom: 0.5rem; }
+        .desc { font-size: 0.95rem; color: var(--text-desc); line-height: 1.5; margin-bottom: 1.75rem; }
+        .group-pill { display: inline-block; background: rgba(79, 70, 229, 0.12); color: var(--primary); font-weight: 700; padding: 0.2rem 0.5rem; border-radius: 6px; }
+        .code-box {
+            position: relative;
+            background: rgba(0, 0, 0, 0.04);
+            border: 2px dashed rgba(79, 70, 229, 0.35);
+            border-radius: 18px;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .code-box:hover { border-color: var(--primary); background: rgba(79, 70, 229, 0.06); transform: scale(1.01); }
+        .code-val { font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 2.25rem; font-weight: 800; letter-spacing: 0.3rem; color: var(--primary); }
+        .hint { font-size: 0.75rem; color: var(--text-desc); margin-top: 0.4rem; }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 1.1rem;
+            border-radius: 9999px;
+            background: rgba(0, 0, 0, 0.06);
+            font-size: 0.85rem;
+            color: var(--text-desc);
+        }
+        .indicator { width: 9px; height: 9px; border-radius: 50%; background-color: #eab308; animation: pulse 1.4s infinite; }
+        .indicator.done { background-color: #22c55e; }
+        @keyframes pulse { 0% { transform: scale(0.9); opacity: 0.7; } 50% { transform: scale(1.3); opacity: 1; } 100% { transform: scale(0.9); opacity: 0.7; } }
+        @keyframes popIn { from { opacity: 0; transform: scale(0.96) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+        {{ .CustomCSS }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1 class="title">{{ .SiteName }}</h1>
+        <p class="desc">请在 QQ 群 <span class="group-pill">{{ .TargetGroupID }}</span><br>发送下方验证码以完成登录</p>
+        
+        <div class="code-box" onclick="copyCode()">
+            <div class="code-val" id="code">{{ .VerifyCode }}</div>
+            <div class="hint" id="hint">点击一键复制验证码</div>
+        </div>
+
+        <div class="status-badge">
+            <span class="indicator" id="ind"></span>
+            <span id="stat-txt">等待发送中... (<span id="t">{{ .TTL }}</span>s)</span>
+        </div>
+    </div>
+
+    <script>
+        const sid = "{{ .SessionID }}";
+        let remain = parseInt("{{ .TTL }}", 10);
+        const tEl = document.getElementById("t");
+
+        const timer = setInterval(() => {
+            remain--;
+            if (remain <= 0) {
+                clearInterval(timer);
+                document.getElementById("stat-txt").innerText = "验证码已过期，请刷新页面";
+                document.getElementById("ind").style.backgroundColor = "#ef4444";
+            } else {
+                tEl.innerText = remain;
+            }
+        }, 1000);
+
+        function copyCode() {
+            const c = document.getElementById("code").innerText.trim();
+            navigator.clipboard.writeText(c).then(() => {
+                const h = document.getElementById("hint");
+                h.innerText = "已复制！快去群里发送吧";
+                h.style.color = "#22c55e";
+                setTimeout(() => {
+                    h.innerText = "点击一键复制验证码";
+                    h.style.color = "";
+                }, 2000);
+            });
+        }
+
+        const sse = new EventSource(`/api/session/stream?session_id=${sid}`);
+        sse.onmessage = function(e) {
+            const data = JSON.parse(e.data);
+            if (data.status === "VERIFIED") {
+                clearInterval(timer);
+                document.getElementById("ind").className = "indicator done";
+                document.getElementById("stat-txt").innerText = "验证通过！正在跳转...";
+                setTimeout(() => { window.location.href = data.redirect_url; }, 350);
+            }
+        };
+        sse.onerror = function() { sse.close(); };
+    </script>
+</body>
+</html>
+6.8 管理控制台界面模板 (web/templates/admin.html)HTML<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OneAuth 系统管理后台</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 2rem; color: #1e293b; }
+        .container { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
+        .panel { background: #fff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        h2 { margin-top: 0; font-size: 1.25rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.75rem; }
+        .form-group { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+        label { font-size: 0.875rem; font-weight: 600; color: #475569; }
+        input, textarea { padding: 0.6rem; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem; }
+        button { background: #4f46e5; color: #fff; padding: 0.6rem 1.2rem; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        button:hover { background: #4338ca; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #e2e8f0; font-size: 0.9rem; }
+        th { color: #64748b; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="panel">
+            <h2>全局系统与视觉定制</h2>
+            <form method="POST" action="/admin/api/settings">
+                <div class="form-group">
+                    <label>系统显示名称</label>
+                    <input type="text" name="site_name" value="{{ .SiteName }}" required>
+                </div>
+                <div class="form-group">
+                    <label>背景壁纸直链 URL</label>
+                    <input type="text" name="background_url" value="{{ .BackgroundURL }}">
+                </div>
+                <div class="form-group">
+                    <label>目标审核 QQ 群号</label>
+                    <input type="text" name="target_group_id" value="{{ .TargetGroupID }}" required>
+                </div>
+                <div class="form-group">
+                    <label>OneBot 反向 WS 连接密钥 (Token)</label>
+                    <input type="text" name="onebot_token" value="{{ .OneBotToken }}">
+                </div>
+                <div class="form-group">
+                    <label>验证码时效 (秒)</label>
+                    <input type="number" name="code_ttl" value="{{ .CodeTTL }}" required>
+                </div>
+                <div class="form-group">
+                    <label>自定义注入 CSS</label>
+                    <textarea name="custom_css" rows="3">{{ .CustomCSS }}</textarea>
+                </div>
+                <button type="submit">保存系统配置</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>OIDC 客户端管理</h2>
+            <form method="POST" action="/admin/api/clients">
+                <div style="display: flex; gap: 1rem;">
+                    <div class="form-group" style="flex: 1;">
+                        <label>应用名称</label>
+                        <input type="text" name="client_name" placeholder="例如: Gitea" required>
+                    </div>
+                    <div class="form-group" style="flex: 2;">
+                        <label>回调 Redirect URI</label>
+                        <input type="url" name="redirect_uri" placeholder="https://git.example.com/user/oauth2/OneAuth/callback" required>
+                    </div>
+                </div>
+                <button type="submit">新增客户端</button>
+            </form>
+
+            <table>
+                <thead>
+                    <tr><th>Client ID</th><th>应用名称</th><th>回调地址白名单</th><th>创建时间</th></tr>
+                </thead>
+                <tbody>
+                    {{ range .Clients }}
+                    <tr>
+                        <td><code>{{ .ClientID }}</code></td>
+                        <td>{{ .ClientName }}</td>
+                        <td>{{ .RedirectURIs }}</td>
+                        <td>{{ .CreatedAt }}</td>
+                    </tr>
+                    {{ else }}
+                    <tr><td colspan="4" style="text-align: center; color: #94a3b8;">暂未注册任何 OIDC 客户端</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+6.9 服务主入口启动流程 (cmd/server/main.go)Gopackage main
+
+import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"log"
+	"math/big"
+	"net/http"
+	"os"
+
+	"oneauth/internal/admin"
+	"oneauth/internal/database"
+	"oneauth/internal/oidc"
+	"oneauth/internal/onebot"
+)
+
+func main() {
+	dbPath := os.Getenv("ONEAUTH_DB_PATH")
+	if dbPath == "" {
+		dbPath = "oneauth.db"
+	}
+	port := os.Getenv("ONEAUTH_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	issuer := os.Getenv("ONEAUTH_ISSUER")
+	if issuer == "" {
+		issuer = "http://localhost:" + port
+	}
+
+	_, err := database.InitDB(dbPath)
+	if err != nil {
+		log.Fatalf("初始化数据库失败: %v", err)
+	}
+
+	privKey, err := loadOrGenerateKey("jwt_rsa.key")
+	if err != nil {
+		log.Fatalf("初始化 RSA 密钥对失败: %v", err)
+	}
+
+	oidcSrv := &oidc.Server{
+		IssuerURL:  issuer,
+		PrivateKey: privKey,
+		KeyID:      "oneauth-primary-key",
+	}
+	adminHandler := &admin.Handler{}
+
+	mux := http.NewServeMux()
+
+	// OIDC 协议端点
+	mux.HandleFunc("GET /.well-known/openid-configuration", oidcSrv.HandleDiscovery)
+	mux.HandleFunc("GET /.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]interface{}{
+				{
+					"kty": "RSA",
+					"use": "sig",
+					"alg": "RS256",
+					"kid": oidcSrv.KeyID,
+					"n":   base64.RawURLEncoding.EncodeToString(privKey.N.Bytes()),
+					"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes()),
+				},
+			},
+		})
+	})
+	mux.HandleFunc("GET /authorize", oidcSrv.HandleAuthorize)
+	mux.HandleFunc("GET /login", oidcSrv.HandleLoginPage)
+	mux.HandleFunc("GET /api/session/stream", oidcSrv.HandleSessionStream)
+	mux.HandleFunc("POST /token", oidcSrv.HandleToken)
+	mux.HandleFunc("GET /userinfo", oidcSrv.HandleUserInfo)
+
+	// OneBot 反向 WebSocket
+	mux.HandleFunc("/ws/onebot", onebot.HandleWebSocket)
+
+	// 管理后台
+	mux.HandleFunc("GET /admin", adminHandler.HandleAdminPage)
+	mux.HandleFunc("POST /admin/api/settings", adminHandler.HandleSaveSettings)
+	mux.HandleFunc("POST /admin/api/clients", adminHandler.HandleCreateClient)
+
+	log.Printf("[OneAuth] 服务正在启动，监听端口: :%s\n", port)
+	log.Printf("[OneAuth] OIDC Issuer: %s\n", issuer)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Fatalf("HTTP 服务终止: %v", err)
+	}
+}
+
+func loadOrGenerateKey(path string) (*rsa.PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		block, _ := pem.Decode(data)
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+
+	pemData := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	_ = os.WriteFile(path, pemData, 0600)
+	return key, nil
+}
+7. 容器编排与生产交付7.1 多阶段编译 DockerfileDockerfile# 编译阶段
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates tzdata
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -extldflags '-static'" \
+    -o /bin/oneauth ./cmd/server
+
+# 运行时阶段
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+
+COPY --from=builder /bin/oneauth /app/oneauth
+
+VOLUME ["/app/data"]
+
+EXPOSE 8080
+
+ENV TZ=Asia/Shanghai
+ENV ONEAUTH_DB_PATH=/app/data/oneauth.db
+ENV ONEAUTH_PORT=8080
+
+ENTRYPOINT ["/app/oneauth"]
+7.2 Docker Compose 编排规范YAMLversion: '3.8'
+
+services:
+  oneauth:
+    image: oneauth:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oneauth
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/oneauth:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - ONEAUTH_PORT=8080
+      - ONEAUTH_DB_PATH=/app/data/oneauth.db
+      - ONEAUTH_ISSUER=https://auth.example.com
+    networks:
+      - auth_net
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - ACCOUNT=123456789 # 你的机器人 QQ 号
+      - HTTP_ENABLE=false
+      - WS_ENABLE=false
+      - REVERSE_WS_ENABLE=true
+      - REVERSE_WS_URLS=["ws://oneauth:8080/ws/onebot"]
+    volumes:
+      - ./data/napcat/qq:/app/.config/QQ
+      - ./data/napcat/config:/app/napcat/config
+    ports:
+      - "6099:6099" # WebUI 扫码登录后台
+    networks:
+      - auth_net
+
+networks:
+  auth_net:
+    driver: bridge
+7.3 Nginx / Caddy 边缘网关反代Nginx 配置示例Nginxserver {
+    listen 443 ssl http2;
+    server_name auth.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/auth.crt;
+    ssl_certificate_key /etc/nginx/ssl/auth.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # 关闭缓冲，保证 SSE 即时推送
+    location /api/session/stream {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
+
+    # 协议端反向 WebSocket 支持
+    location /ws/onebot {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+    }
+}
+8. 第三方系统对接与故障排查 Runbook8.1 Gitea / Forgejo 快速接入登录 Gitea 管理员账户，前往 管理面板 -> 认证来源 -> 添加认证来源。配置参数：认证类型：OAuth2OAuth2 提供商：OpenID Connect 1.0客户端 ID：填入 OneAuth 生成的 client_id客户端密钥：填入对应的 client_secretOpenID 连接自动发现 URL：[https://auth.example.com/.well-known/openid-configuration](https://auth.example.com/.well-known/openid-configuration)额外 Scopes：openid profile email保存后，普通用户即可点击“通过 OneAuth 登录”，自动同步 QQ 号为用户名及 QQ 头像。8.2 故障排查手册 (Troubleshooting Matrix)异常现象核心排查链路根因与解决方案NapCat 显示无法连接 WS查看 docker logs napcat容器间网络未互通，检查两者是否处于同个 Docker Network 且目标为 ws://oneauth:8080/ws/onebot。群内发码后前端无跳转1. 检查浏览器 Console 的 SSE 连接状态2. 查看 OneAuth 日志是否输出 成功完成核销若无日志：群号不匹配或 OneBot 未上报群消息。若有日志但前端未跳：反代开启了 proxy_buffering 拦截了 SSE 数据块，配置 proxy_buffering off; 即可。SQLite 出现 database is locked检查当前是否在跨进程同时读写 .db 文件确保为单一容器实例运行，严禁挂载网络文件系统（NFS）；确认连接已开启 WAL 模式。第三方报错 missing required claim: email检查第三方应用 Claims 映射规则OneAuth 默认签发 {qq}@qq.com 格式邮箱，且 email_verified=true，确认 Scope 申请包含了 email。落地执行验证清单[ ] 源码环境校验：执行 go mod tidy 确认依赖无缺失，直接 go run cmd/server/main.go 验证单二进制冷启动成功。[ ] 容器编排拉起：运行 docker compose up -d，访问 :6099 扫码登录机器人 QQ。[ ] 反向 WS 联通测试：观察 OneAuth 日志，确保输出 [OneBot] 协议端客户端已成功连接反向 WebSocket。[ ] UI 视觉与目标群核验：在 /admin 后台填入指定群号与背景图 URL，确认 /login 页面样式实时生效。[ ] 全链路闭环核销：发起一次 OIDC 授权，群内发送 6 位验证码，检查 SSE 是否自动驱动浏览器重定向并完成 Token 签发。

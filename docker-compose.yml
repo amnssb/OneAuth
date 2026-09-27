@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  oneauth:
+    image: oneauth:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oneauth
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - oneauth-data:/data
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=9000
+      - DB_PATH=/data/oneauth.db
+      - KEY_PATH=/data/oneauth_rsa.pem
+    networks:
+      - oneauth-net
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+      - ACCOUNT=123456789  # 替换为你的机器人 QQ 号
+    volumes:
+      - napcat-data:/app/.config/QQ
+      - napcat-config:/app/napcat/config
+    ports:
+      - "6099:6099"  # WebUI 扫码登录后台
+    networks:
+      - oneauth-net
+
+volumes:
+  oneauth-data:
+  napcat-data:
+  napcat-config:
+
+networks:
+  oneauth-net:
+    driver: bridge

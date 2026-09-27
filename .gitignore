@@ -1,0 +1,24 @@
+# Binaries
+*.exe
+*.exe~
+tester.exe
+oneauth-linux-amd64
+oneauth-linux-arm64
+*.dll
+*.so
+*.dylib
+
+# SQLite Database & Private Keys
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.pem
+*.key
+
+# Temporary files & logs
+*.bak
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
