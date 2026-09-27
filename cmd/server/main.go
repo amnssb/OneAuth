@@ -21,6 +21,7 @@ import (
 
 	"oneauth/internal/admin"
 	"oneauth/internal/database"
+	"oneauth/internal/identity"
 	"oneauth/internal/oidc"
 	"oneauth/internal/onebot"
 	"oneauth/internal/session"
@@ -106,6 +107,9 @@ func main() {
 			"BackgroundURL": background,
 			"CustomCSS":     template.CSS(customCSS),
 			"TTL":           ttl,
+			// 登录页当前仅 QQ 一条核销通道；多平台接入后这里按会话可用的
+			// 通道动态展示各平台说明。
+			"PlatformLabel": identity.Label(identity.ProviderQQ),
 		}
 		if err := loginTmpl.Execute(w, data); err != nil {
 			log.Printf("[模板渲染] 登录页渲染失败: %v\n", err)

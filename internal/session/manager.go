@@ -23,17 +23,21 @@ type AuthSession struct {
 	State         string
 	CodeChallenge string
 	VerifyCode    string
-	QQNumber      string
-	AuthCode      string
-	Status        SessionStatus
-	ExpiresAt     time.Time
-	NotifyChan    chan struct{}
+	// 核销后的平台身份：Provider 标识来源平台（见 internal/identity），
+	// UserID 为该平台内的用户标识（qq 平台下即 QQ 号）。
+	// 核销前两者均为空。
+	Provider   string
+	UserID     string
+	AuthCode   string
+	Status     SessionStatus
+	ExpiresAt  time.Time
+	NotifyChan chan struct{}
 }
 
 // 并发约定：session 发布到 map 之后，
 //   - SessionID/ClientID/RedirectURI/State/CodeChallenge/VerifyCode/ExpiresAt/
 //     NotifyChan 不可变，处理器（如 SSE）可无锁读取或等待 NotifyChan；
-//   - QQNumber/Status/AuthCode 仅在 Manager.mu 写锁下读写，
+//   - Provider/UserID/Status/AuthCode 仅在 Manager.mu 写锁下读写，
 //     处理器不得直接访问（统一走 Manager 的方法）。
 
 type Manager struct {
@@ -129,7 +133,9 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, 
 	return nil, errors.New("failed to generate unique code after 100 attempts")
 }
 
-func (m *Manager) VerifyCode(code, qqNumber string) (*AuthSession, bool) {
+// VerifyCode 把验证码核销为平台身份并绑定到会话。provider 标识核销通道
+// 来源（当前仅 identity.ProviderQQ，新平台接入各自通道时传自己的标识）。
+func (m *Manager) VerifyCode(provider, code, userID string) (*AuthSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -142,7 +148,8 @@ func (m *Manager) VerifyCode(code, qqNumber string) (*AuthSession, bool) {
 		return nil, false
 	}
 
-	session.QQNumber = qqNumber
+	session.Provider = provider
+	session.UserID = userID
 	session.Status = StatusVerified
 
 	delete(m.codeIndex, code)

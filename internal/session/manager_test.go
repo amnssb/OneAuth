@@ -61,7 +61,7 @@ func TestConcurrentVerifyCodeSingleUse(t *testing.T) {
 			wg.Add(1)
 			go func(s *AuthSession) {
 				defer wg.Done()
-				if _, ok := m.VerifyCode(s.VerifyCode, "10001"); ok {
+				if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); ok {
 					atomic.AddInt64(&successCount, 1)
 				}
 			}(sessions[i])
@@ -88,7 +88,7 @@ func TestVerifyCodeExpired(t *testing.T) {
 	s.ExpiresAt = time.Now().Add(-time.Second)
 	m.mu.Unlock()
 
-	if _, ok := m.VerifyCode(s.VerifyCode, "10001"); ok {
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); ok {
 		t.Fatal("expired code must not verify")
 	}
 }
@@ -107,7 +107,7 @@ func TestNotifyChanClosedOnVerify(t *testing.T) {
 		close(done)
 	}()
 
-	if _, ok := m.VerifyCode(s.VerifyCode, "10001"); !ok {
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); !ok {
 		t.Fatal("verify failed")
 	}
 	select {

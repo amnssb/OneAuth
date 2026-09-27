@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"oneauth/internal/database"
+	"oneauth/internal/identity"
 	"oneauth/internal/session"
 
 	"github.com/gorilla/websocket"
@@ -196,9 +197,9 @@ func processEvent(raw []byte) {
 	log.Printf("[OneBot] Received target group message: '%s' from user: '%s' (%s)", loggable(text), userID, origin)
 
 	if codeRegex.MatchString(text) {
-		sess, ok := session.DefaultManager.VerifyCode(text, userID)
+		sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, text, userID)
 		if ok {
-			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → QQ: %s | Session: %s\n", text, userID, sess.SessionID)
+			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", text, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
 		} else {
 			log.Printf("[OneBot] ✗ 验证码匹配未成功: code='%s' not found or expired", text)
 		}
@@ -209,8 +210,8 @@ func processEvent(raw []byte) {
 	// so a message that quotes two codes consumes the last one actually sent.
 	if match := codeSearchRegex.FindAllString(text, -1); len(match) > 0 {
 		candidate := match[len(match)-1]
-		if sess, ok := session.DefaultManager.VerifyCode(candidate, userID); ok {
-			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → QQ: %s | Session: %s\n", candidate, userID, sess.SessionID)
+		if sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, candidate, userID); ok {
+			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", candidate, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
 			return
 		}
 		// 提取出的候选未命中：多为普通聊天或长报文里的大写串（UUID、单号等），

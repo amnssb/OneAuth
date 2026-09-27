@@ -21,6 +21,7 @@ import (
 	jwtLib "github.com/golang-jwt/jwt/v5"
 
 	"oneauth/internal/database"
+	"oneauth/internal/identity"
 	"oneauth/internal/session"
 )
 
@@ -234,17 +235,20 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 	issuer := getIssuer(r)
 	now := time.Now()
 
+	profile := identity.ProfileFor(identity.Identity{Provider: sess.Provider, UserID: sess.UserID})
+
 	claims := jwtLib.MapClaims{
-		"iss":                issuer,
-		"sub":                sess.QQNumber,
-		"aud":                clientID,
-		"exp":                now.Add(time.Hour).Unix(),
-		"iat":                now.Unix(),
-		"name":               "QQ用户_" + sess.QQNumber,
-		"preferred_username": sess.QQNumber,
-		"email":              sess.QQNumber + "@qq.com",
-		"email_verified":     true,
-		"picture":            fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", sess.QQNumber),
+		"iss": issuer,
+		"sub": sess.UserID,
+		"aud": clientID,
+		"exp": now.Add(time.Hour).Unix(),
+		"iat": now.Unix(),
+		// 平台相关资料由 identity.ProfileFor 按来源平台生成；
+		// identity_provider 供接入方区分登录平台（新增声明，向后兼容）。
+		"identity_provider": sess.Provider,
+	}
+	for k, v := range profile.Claims() {
+		claims[k] = v
 	}
 
 	token := jwtLib.NewWithClaims(jwtLib.SigningMethodRS256, claims)
@@ -293,14 +297,10 @@ func handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sub, _ := claims["sub"].(string)
-	userInfo := map[string]interface{}{
-		"sub":                sub,
-		"name":               "QQ用户_" + sub,
-		"preferred_username": sub,
-		"email":              sub + "@qq.com",
-		"email_verified":     true,
-		"picture":            fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", sub),
-	}
+	provider, _ := claims["identity_provider"].(string)
+	userInfo := identity.ProfileFor(identity.Identity{Provider: provider, UserID: sub}).Claims()
+	userInfo["sub"] = sub
+	userInfo["identity_provider"] = provider
 	writeJSON(w, http.StatusOK, userInfo)
 }
 
