@@ -491,6 +491,7 @@ auto_login = false
 
 ### Q4: `docker compose up` 拉取镜像报 `failed size validation: xxx != yyy: failed precondition`？
 - **原因**: Docker Hub 镜像加速器（`/etc/docker/daemon.json` 里的 `registry-mirrors`）返回了错误的 manifest —— 多数是加速器已失效或缓存损坏，错误页被当成了 manifest。国内服务器极为常见。
+- **海外服务器**: 不需要任何加速器，把 `registry-mirrors` 整个删掉（`daemon.json` 写 `{}`）直连 Docker Hub 即可；失效的国内加速器恰恰是报错来源。
 - **解决**:
   1. 先单独重试确认非偶发：`docker pull mlikiowa/napcat-docker:latest`
   2. 检查 `cat /etc/docker/daemon.json`，把失效的加速器换成可用的（社区公共加速器时效性强，选当前可用的即可），然后：
@@ -500,5 +501,5 @@ auto_login = false
      docker pull <可用加速站>/mlikiowa/napcat-docker:latest
      docker tag  <可用加速站>/mlikiowa/napcat-docker:latest mlikiowa/napcat-docker:latest
      ```
-  4. 构建阶段的基础镜像（`golang:1.22-alpine` / `alpine:3.20`）走同一个加速器配置，修复后一并生效。
+  4. 构建阶段的基础镜像（`golang:1.22-alpine` / `alpine:3.20`）走同一个加速器配置，修复后一并生效；Go 模块代理同理 —— 国内用 `--build-arg GOPROXY=https://goproxy.cn,direct`，海外用默认 `proxy.golang.org` 即可。
 
