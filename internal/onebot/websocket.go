@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"oneauth/internal/database"
 	"oneauth/internal/session"
@@ -33,6 +35,35 @@ const (
 	eventQueueLen = 256
 )
 
+// 连接状态原子量：供管理后台概览轮询 OneBot 反向 WS 的实时接入情况，
+// 读写都不需要加锁（事件处理在独立 goroutine，连接生命周期在 handler）。
+var (
+	botConns          atomic.Int32
+	botLastConnect    atomic.Int64 // unix 秒
+	botLastDisconnect atomic.Int64 // unix 秒
+	botLastEvent      atomic.Int64 // unix 秒
+)
+
+// Status 返回 OneBot 反向 WS 的实时连接概况。时间字段为 RFC3339，未发生过
+// 时返回空字符串。
+func Status() map[string]any {
+	conns := botConns.Load()
+	return map[string]any{
+		"connected":       conns > 0,
+		"connections":     conns,
+		"last_connected":  unixRFC3339(botLastConnect.Load()),
+		"last_disconnect": unixRFC3339(botLastDisconnect.Load()),
+		"last_event":      unixRFC3339(botLastEvent.Load()),
+	}
+}
+
+func unixRFC3339(sec int64) string {
+	if sec == 0 {
+		return ""
+	}
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
+}
+
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	token := database.GetSetting("onebot_token", "")
 	if token != "" {
@@ -53,6 +84,14 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(wsReadLimit)
+
+	now := time.Now().Unix()
+	botConns.Add(1)
+	botLastConnect.Store(now)
+	defer func() {
+		botConns.Add(-1)
+		botLastDisconnect.Store(time.Now().Unix())
+	}()
 
 	log.Println("OneBot WebSocket connected:", r.RemoteAddr)
 
@@ -84,6 +123,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func processEvent(raw []byte) {
+	botLastEvent.Store(time.Now().Unix())
+
 	var event map[string]interface{}
 	if err := json.Unmarshal(raw, &event); err != nil {
 		return

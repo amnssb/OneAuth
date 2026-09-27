@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OneAuth 控制台 - 统一身份认证系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         /* Design tokens copied from ObsidianArc's web/src/styles/_chat.scss so
            both projects read as one system: neutral zinc surfaces, a
@@ -89,7 +92,7 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                 "Microsoft YaHei", Roboto, sans-serif;
             min-height: 100vh;
             color: var(--ai-text-secondary);
@@ -752,17 +755,17 @@
                 <label>管理员账号</label>
                 <div class="input-wrapper">
                     <span class="input-icon">👤</span>
-                    <input type="text" id="loginUser" placeholder="admin">
+                    <input type="text" id="loginUser" placeholder="admin" onkeydown="if(event.key==='Enter')document.getElementById('authBtn').click()">
                 </div>
             </div>
             <div class="form-group" style="text-align: left;">
                 <label>密码</label>
                 <div class="input-wrapper">
                     <span class="input-icon">🔒</span>
-                    <input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter') submitAuth()">
+                    <input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')document.getElementById('authBtn').click()">
                 </div>
             </div>
-            <button class="btn btn-primary" style="width:100%; margin-top: 6px;" id="authBtn" onclick="submitAuth()">
+            <button class="btn btn-primary" style="width:100%; margin-top: 6px;" id="authBtn" onclick="submitAuth(this)">
                 <span>进入控制台</span> ➔
             </button>
         </div>
@@ -789,6 +792,57 @@
             </div>
             <div class="modal-actions">
                 <button class="btn btn-primary" onclick="closeSecretModal()">我已保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 客户端编辑弹窗：名称 / 回调地址 / 登录页品牌覆盖 -->
+    <div class="modal-overlay hidden" id="editModal">
+        <div class="modal-box" style="max-width:560px; max-height:90vh; overflow-y:auto;">
+            <h3>编辑应用</h3>
+            <p class="modal-desc">品牌覆盖仅影响该项目发起登录时的登录页 —— 多项目接入时各项目可拥有自己的页面；留空表示继承全局设置。</p>
+            <div class="form-group">
+                <label>应用名称</label>
+                <div class="input-wrapper">
+                    <span class="input-icon">📦</span>
+                    <input id="editClientName" type="text">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>授权回调地址 (Redirect URIs) <span class="label-hint">多个地址用英文逗号分隔</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🔗</span>
+                    <input id="editRedirectURIs" type="text">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>登录页显示名 <span class="label-hint">留空继承全局站点名称</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🏷️</span>
+                    <input id="editDisplayName" type="text">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>登录页背景图 URL <span class="label-hint">留空继承全局</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🖼️</span>
+                    <input id="editBgUrl" type="text">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>登录提示文案 <span class="label-hint">留空继承全局</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">💬</span>
+                    <input id="editPromptText" type="text">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>自定义 CSS <span class="label-hint">仅作用于该项目的登录页</span></label>
+                <textarea id="editCustomCss" rows="4"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeEditModal()">取消</button>
+                <button class="btn btn-primary" onclick="withBusy(this, saveClientEdit)"><span>保存修改</span></button>
             </div>
         </div>
     </div>
@@ -866,8 +920,12 @@
                         </a>
                         <div class="header-status-card">
                             <div class="status-metric">
-                                <span class="metric-label">节点运行时间</span>
-                                <span class="metric-value" id="uptimeDisplay">00:00:00</span>
+                                <span class="metric-label">服务运行时间</span>
+                                <span class="metric-value" id="uptimeDisplay">—</span>
+                            </div>
+                            <div class="status-metric">
+                                <span class="metric-label">内存占用</span>
+                                <span class="metric-value" id="memDisplay">—</span>
                             </div>
                         </div>
                     </div>
@@ -893,10 +951,16 @@
                         <div class="stat-hint">内存原子核销防重放</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-icon">⚡</div>
-                        <div class="stat-val" style="color:var(--ai-success)">WAL 模式</div>
-                        <div class="stat-label">SQLite 持久化引擎</div>
-                        <div class="stat-hint">并发无锁高吞吐</div>
+                        <div class="stat-icon">🤖</div>
+                        <div class="stat-val" id="statBotStatus">检测中</div>
+                        <div class="stat-label">OneBot 反向 WS 节点</div>
+                        <div class="stat-hint" id="statBotHint">等待状态数据…</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🧩</div>
+                        <div class="stat-val" id="statSessionCount">0</div>
+                        <div class="stat-label">内存登录会话</div>
+                        <div class="stat-hint" id="statSessionHint">待核销 0 · 已验证 0</div>
                     </div>
                 </div>
 
@@ -997,7 +1061,7 @@
                         </div>
                     </div>
                     <div style="display:flex; justify-content:flex-end;">
-                        <button class="btn btn-primary" onclick="saveSettings()">
+                        <button class="btn btn-primary" onclick="withBusy(this, () => saveSettings('appearance'))">
                             <span>💾 保存外观设置</span>
                         </button>
                     </div>
@@ -1040,7 +1104,7 @@
                         </div>
                     </div>
                     <div style="display:flex; justify-content:flex-end;">
-                        <button class="btn btn-primary" onclick="createClient()">
+                        <button class="btn btn-primary" onclick="withBusy(this, createClient)">
                             <span>✨ 创建应用</span>
                         </button>
                     </div>
@@ -1066,6 +1130,30 @@
                     <div class="page-header-text">
                         <h2>🤖 OneBot 机器人连接配置</h2>
                         <p>设置群聊验证码监听规则、NapCatQQ 反向 WebSocket 鉴权凭证及超时时效。</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">📡</span>
+                            <div>
+                                <div class="card-title">NapCatQQ 实时连接状态</div>
+                                <div class="card-desc">每 5 秒自动刷新，展示反向 WS 接入情况与最近事件。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="client-list">
+                        <div class="client-item">
+                            <div class="client-meta">
+                                <div class="client-icon-avatar" id="botDot">⚪</div>
+                                <div class="client-name-id">
+                                    <div class="client-name" id="botStateText">检测中…</div>
+                                    <div class="client-id" id="botStateMeta">尚未获取到状态</div>
+                                </div>
+                            </div>
+                            <span class="brand-badge" id="botStateBadge" style="color:var(--ai-text-secondary);">PENDING</span>
+                        </div>
                     </div>
                 </div>
 
@@ -1103,7 +1191,7 @@
                         </div>
                     </div>
                     <div style="display:flex; justify-content:flex-end;">
-                        <button class="btn btn-primary" onclick="saveSettings()">
+                        <button class="btn btn-primary" onclick="withBusy(this, () => saveSettings('bot'))">
                             <span>💾 保存 Bot 配置</span>
                         </button>
                     </div>
@@ -1146,7 +1234,7 @@
                         </div>
                     </div>
                     <div style="display:flex; justify-content:flex-end;">
-                        <button class="btn btn-primary" onclick="changeAdminPassword()">
+                        <button class="btn btn-primary" onclick="withBusy(this, changeAdminPassword)">
                             <span>🔐 确认修改密码</span>
                         </button>
                     </div>
@@ -1160,127 +1248,159 @@
 
     <script>
     let token = localStorage.getItem('admin_token');
+    let statsTimer = null;
+    let serverUptime = null;
+    let lastSync = 0;
+
+    const $ = id => document.getElementById(id);
 
     async function initCheck() {
         if (token) {
             showApp();
             return;
         }
-        document.getElementById('loginOverlay').classList.remove('hidden');
+        $('loginOverlay').classList.remove('hidden');
     }
 
-    async function submitAuth() {
-        const user = document.getElementById('loginUser').value;
-        const pass = document.getElementById('loginPass').value;
+    // 统一请求封装：自动携带 token，集中处理网络错误、非 JSON 响应与 401，
+    // 调用方只写成功路径，出错时抛出带可读信息的 Error。
+    async function apiFetch(url, options = {}, { allow401 = false } = {}) {
+        const opts = Object.assign({}, options);
+        opts.headers = Object.assign({'Authorization': 'Bearer ' + token}, options.headers || {});
+        let res;
+        try {
+            res = await fetch(url, opts);
+        } catch (e) {
+            throw new Error('网络请求失败，请确认服务是否在线');
+        }
+        if (res.status === 401 && !allow401) {
+            forceLogout();
+            throw new Error('登录已过期，请重新登录');
+        }
+        let data = null;
+        if ((res.headers.get('content-type') || '').includes('application/json')) {
+            data = await res.json().catch(() => null);
+        }
+        if (!res.ok) {
+            throw new Error((data && (data.error || data.message)) || '请求失败 (' + res.status + ')');
+        }
+        return data;
+    }
+
+    // 按钮防重复提交：执行期间标记 busy，失败统一在这里弹 toast。
+    async function withBusy(btn, fn) {
+        if (!btn || btn.dataset.busy) return;
+        btn.dataset.busy = '1';
+        btn.style.opacity = '0.6';
+        try {
+            await fn();
+        } catch (e) {
+            showToast(e.message || '操作失败', 'error');
+        } finally {
+            delete btn.dataset.busy;
+            btn.style.opacity = '';
+        }
+    }
+
+    async function submitAuth(btn) {
+        const user = $('loginUser').value.trim();
+        const pass = $('loginPass').value;
         if (!user || !pass) return showToast('请输入用户名和密码', 'error');
 
-        try {
-            let res = await fetch('/api/admin/login', {
+        await withBusy(btn, async () => {
+            const data = await apiFetch('/api/admin/login', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({username: user, password: pass})
-            });
-            let data = await res.json();
-            if (res.ok) {
-                token = data.token;
-                localStorage.setItem('admin_token', token);
-                document.getElementById('displayUsername').innerText = user;
-                showApp();
-                showToast('欢迎回来，管理员！', 'success');
-            } else {
-                showToast(data.error || '用户名或密码错误', 'error');
-            }
-        } catch(e) {
-            showToast('无法连接至认证后台', 'error');
-        }
+            }, { allow401: true });
+            token = data.token;
+            localStorage.setItem('admin_token', token);
+            $('displayUsername').innerText = user;
+            $('loginPass').value = '';
+            showApp();
+            showToast('欢迎回来，管理员！', 'success');
+        });
     }
 
     function showApp() {
-        document.getElementById('loginOverlay').classList.add('hidden');
-        document.getElementById('appShell').classList.remove('hidden');
+        $('loginOverlay').classList.add('hidden');
+        $('appShell').classList.remove('hidden');
         loadSettings();
         loadClients();
+        refreshStats();
+        if (!statsTimer) statsTimer = setInterval(refreshStats, 5000);
     }
 
     async function loadSettings() {
-        let res = await fetch('/api/admin/settings', { headers: {'Authorization': 'Bearer ' + token} });
-        if (res.status === 401) { logout(); return; }
-        let s = await res.json();
-        document.getElementById('siteName').value = s.site_name || '';
-        document.getElementById('promptText').value = s.prompt_text || '请发送验证码至群';
-        document.getElementById('bgUrl').value = s.background_url || '';
-        document.getElementById('customCss').value = s.custom_css || '';
-        document.getElementById('groupId').value = s.target_group_id || '';
-        document.getElementById('botToken').value = s.onebot_token || '';
-        document.getElementById('codeTtl').value = s.code_ttl || '180';
+        try {
+            const s = await apiFetch('/api/admin/settings');
+            $('siteName').value = s.site_name || '';
+            $('promptText').value = s.prompt_text || '请发送验证码至群';
+            $('bgUrl').value = s.background_url || '';
+            $('customCss').value = s.custom_css || '';
+            $('groupId').value = s.target_group_id || '';
+            $('botToken').value = s.onebot_token || '';
+            $('codeTtl').value = s.code_ttl || '180';
 
-        document.getElementById('statTargetGroup').innerText = s.target_group_id || '未配置';
-        document.getElementById('statCodeTtl').innerText = (s.code_ttl || '180') + 's';
+            $('statTargetGroup').innerText = s.target_group_id || '未配置';
+            $('statCodeTtl').innerText = (s.code_ttl || '180') + 's';
 
-        if (s.background_url) {
-            document.getElementById('adminBgLayer').style.backgroundImage = 'url(' + s.background_url + ')';
+            if (s.background_url) {
+                $('adminBgLayer').style.backgroundImage = 'url(' + s.background_url + ')';
+            }
+        } catch (e) {
+            showToast(e.message, 'error');
         }
     }
 
-    async function saveSettings() {
-        let body = {
-            site_name: document.getElementById('siteName').value,
-            prompt_text: document.getElementById('promptText').value,
-            background_url: document.getElementById('bgUrl').value,
-            custom_css: document.getElementById('customCss').value,
-            target_group_id: document.getElementById('groupId').value,
-            onebot_token: document.getElementById('botToken').value,
-            code_ttl: document.getElementById('codeTtl').value
+    // saveSettings 只提交当前页面的键，避免两个页面互相覆盖对方未展示的修改；
+    // 后端同样会做范围/格式校验，这里先挡一道给出即时反馈。
+    async function saveSettings(scope) {
+        const appearance = {
+            site_name: $('siteName').value,
+            prompt_text: $('promptText').value,
+            background_url: $('bgUrl').value,
+            custom_css: $('customCss').value
         };
-        let res = await fetch('/api/admin/settings', {
+        const bot = {
+            target_group_id: $('groupId').value,
+            onebot_token: $('botToken').value,
+            code_ttl: $('codeTtl').value
+        };
+        if (scope === 'bot' || !scope) {
+            const ttl = bot.code_ttl.trim();
+            if (ttl !== '' && (!/^\d+$/.test(ttl) || +ttl < 10 || +ttl > 3600)) {
+                throw new Error('验证码有效期须为 10~3600 秒');
+            }
+        }
+        const body = scope === 'bot' ? bot : scope === 'appearance' ? appearance : Object.assign({}, appearance, bot);
+        await apiFetch('/api/admin/settings', {
             method: 'POST',
-            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body)
         });
-        if (res.ok) {
-            showToast('系统与外观设置已成功保存！', 'success');
-            loadSettings();
-        } else {
-            showToast('保存设置失败', 'error');
-        }
+        showToast('设置已保存', 'success');
+        await loadSettings();
     }
 
     async function changeAdminPassword() {
-        const oldPassword = document.getElementById('oldPassword').value;
-        const newPassword = document.getElementById('newPassword').value;
-        if (!oldPassword || !newPassword) {
-            return showToast('请完整填写原密码和新密码', 'error');
-        }
-        if (newPassword.length < 6) {
-            return showToast('新密码长度不能少于 6 位', 'error');
-        }
+        const oldPassword = $('oldPassword').value;
+        const newPassword = $('newPassword').value;
+        if (!oldPassword || !newPassword) throw new Error('请完整填写原密码和新密码');
+        if (newPassword.length < 6) throw new Error('新密码长度不能少于 6 位');
 
-        try {
-            let res = await fetch('/api/admin/password', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + token,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    old_password: oldPassword,
-                    new_password: newPassword
-                })
-            });
-            let data = await res.json();
-            if (res.ok) {
-                showToast('服务密码修改成功！请重新登录', 'success');
-                document.getElementById('oldPassword').value = '';
-                document.getElementById('newPassword').value = '';
-                setTimeout(() => {
-                    logout();
-                }, 1500);
-            } else {
-                showToast(data.message || data.error || '原密码错误或修改失败', 'error');
-            }
-        } catch(e) {
-            showToast('修改密码网络请求失败', 'error');
-        }
+        await apiFetch('/api/admin/password', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                old_password: oldPassword,
+                new_password: newPassword
+            })
+        });
+        $('oldPassword').value = '';
+        $('newPassword').value = '';
+        showToast('密码修改成功，即将重新登录', 'success');
+        setTimeout(forceLogout, 1200);
     }
 
     // Client names and URIs come back out of the database and into markup, so
@@ -1292,13 +1412,13 @@
     }
 
     async function loadClients() {
-        let res = await fetch('/api/admin/clients', { headers: {'Authorization': 'Bearer ' + token} });
-        let clients = await res.json();
-        let html = '';
-        let count = 0;
-        if (Array.isArray(clients) && clients.length > 0) {
-            count = clients.length;
-            clients.forEach(c => {
+        try {
+            const clients = await apiFetch('/api/admin/clients');
+            let html = '';
+            const list = Array.isArray(clients) ? clients : [];
+            clientMap = {};
+            list.forEach(c => {
+                clientMap[c.client_id] = c;
                 html += '<div class="client-item">' +
                     '<div class="client-meta">' +
                         '<div class="client-icon-avatar">🔑</div>' +
@@ -1308,40 +1428,43 @@
                         '</div>' +
                     '</div>' +
                     '<div class="client-uris-badge" title="' + escapeHtml(c.redirect_uris || '') + '">回调: ' + escapeHtml(c.redirect_uris || '') + '</div>' +
-                    '<button class="btn btn-danger" data-client-id="' + escapeHtml(c.client_id) + '">🗑️ 移除</button>' +
+                    '<div style="display:flex; gap:8px; flex-shrink:0;">' +
+                        '<button class="btn btn-secondary" data-edit-id="' + escapeHtml(c.client_id) + '" style="padding:6px 14px; font-size:0.8rem;">✏️ 编辑</button>' +
+                        '<button class="btn btn-danger" data-client-id="' + escapeHtml(c.client_id) + '">🗑️ 移除</button>' +
+                    '</div>' +
                 '</div>';
             });
+            const listEl = $('clientList');
+            listEl.innerHTML = html || '<div style="text-align:center;padding:36px;color:var(--ai-text-secondary);">暂无注册应用，请在上方创建第一个 OIDC Client</div>';
+            listEl.querySelectorAll('.btn-danger[data-client-id]').forEach(btn => {
+                btn.addEventListener('click', () => removeClient(btn.dataset.clientId));
+            });
+            listEl.querySelectorAll('.btn-secondary[data-edit-id]').forEach(btn => {
+                btn.addEventListener('click', () => openEditModal(btn.dataset.editId));
+            });
+            $('clientCountPill').innerText = list.length;
+            $('statClientCount').innerText = list.length;
+        } catch (e) {
+            showToast(e.message, 'error');
         }
-        const list = document.getElementById('clientList');
-        list.innerHTML = html || '<div style="text-align:center;padding:36px;color:var(--ai-text-secondary);">暂无注册应用，请在上方创建第一个 OIDC Client</div>';
-        list.querySelectorAll('.btn-danger[data-client-id]').forEach(btn => {
-            btn.addEventListener('click', () => removeClient(btn.dataset.clientId));
-        });
-        document.getElementById('clientCountPill').innerText = count;
-        document.getElementById('statClientCount').innerText = count;
     }
 
     async function createClient() {
-        let name = document.getElementById('newClientName').value.trim();
-        let uris = document.getElementById('newRedirectURIs').value.trim();
-        if (!name || !uris) return showToast('请填写应用名称和回调地址', 'error');
+        const name = $('newClientName').value.trim();
+        const uris = $('newRedirectURIs').value.trim();
+        if (!name || !uris) throw new Error('请填写应用名称和回调地址');
 
-        let res = await fetch('/api/admin/clients', {
+        const data = await apiFetch('/api/admin/clients', {
             method: 'POST',
-            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ client_name: name, redirect_uris: uris })
         });
-        let data = await res.json();
-        if (res.ok) {
-            document.getElementById('newClientName').value = '';
-            document.getElementById('newRedirectURIs').value = '';
-            document.getElementById('secretClientId').textContent = data.client_id || '';
-            document.getElementById('secretClientSecret').textContent = data.client_secret || '';
-            document.getElementById('secretModal').classList.remove('hidden');
-            loadClients();
-        } else {
-            showToast(data.error || '创建失败', 'error');
-        }
+        $('newClientName').value = '';
+        $('newRedirectURIs').value = '';
+        $('secretClientId').textContent = data.client_id || '';
+        $('secretClientSecret').textContent = data.client_secret || '';
+        $('secretModal').classList.remove('hidden');
+        await loadClients();
     }
 
     function closeSecretModal() {
@@ -1372,13 +1495,56 @@
     // returns immediately in some contexts and would delete without an answer.
     function removeClient(id) {
         confirmAction('移除客户端', '移除后使用该 Client ID 的业务系统将无法登录，且不可恢复。确定继续吗？', async () => {
-            await fetch('/api/admin/clients/' + encodeURIComponent(id), {
-                method: 'DELETE',
-                headers: {'Authorization': 'Bearer ' + token}
-            });
-            loadClients();
-            showToast('已移除客户端', 'success');
+            try {
+                await apiFetch('/api/admin/clients/' + encodeURIComponent(id), { method: 'DELETE' });
+                await loadClients();
+                showToast('已移除客户端', 'success');
+            } catch (e) {
+                showToast(e.message, 'error');
+            }
         });
+    }
+
+    // ---- 客户端编辑：名称 / 回调地址 / 登录页品牌覆盖 ----
+    let clientMap = {};
+    let editClientId = null;
+
+    function openEditModal(id) {
+        const c = clientMap[id];
+        if (!c) return;
+        editClientId = id;
+        $('editClientName').value = c.client_name || '';
+        $('editRedirectURIs').value = c.redirect_uris || '';
+        $('editDisplayName').value = c.display_name || '';
+        $('editBgUrl').value = c.background_url || '';
+        $('editPromptText').value = c.prompt_text || '';
+        $('editCustomCss').value = c.custom_css || '';
+        $('editModal').classList.remove('hidden');
+    }
+
+    function closeEditModal() {
+        $('editModal').classList.add('hidden');
+        editClientId = null;
+    }
+
+    async function saveClientEdit() {
+        if (!editClientId) throw new Error('没有正在编辑的应用');
+        const body = {
+            client_name: $('editClientName').value,
+            redirect_uris: $('editRedirectURIs').value,
+            display_name: $('editDisplayName').value,
+            background_url: $('editBgUrl').value,
+            prompt_text: $('editPromptText').value,
+            custom_css: $('editCustomCss').value
+        };
+        await apiFetch('/api/admin/clients/' + encodeURIComponent(editClientId), {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        closeEditModal();
+        showToast('应用已更新', 'success');
+        await loadClients();
     }
 
     let confirmHandler = null;
@@ -1419,20 +1585,92 @@
         setTimeout(() => toast.classList.remove('show'), 3500);
     }
 
-    function logout() {
+    // 注销：先让服务端吊销会话（token 立即失效），再清理本地凭据。
+    async function logout() {
+        try {
+            await fetch('/api/admin/logout', { method: 'POST', headers: {'Authorization': 'Bearer ' + token} });
+        } catch (e) { /* 网络失败也要完成本地登出 */ }
+        forceLogout();
+    }
+
+    function forceLogout() {
         localStorage.removeItem('admin_token');
+        if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
         location.reload();
     }
 
-    let startTime = Date.now();
+    function fmtUptime(sec) {
+        const d = Math.floor(sec / 86400);
+        const h = String(Math.floor((sec % 86400) / 3600)).padStart(2, '0');
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+        const s = String(sec % 60).padStart(2, '0');
+        return (d > 0 ? d + ' 天 ' : '') + h + ':' + m + ':' + s;
+    }
+
+    function fmtTime(iso) {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        return isNaN(d) ? '—' : d.toLocaleTimeString();
+    }
+
+    // refreshStats 每 5 秒拉取服务端真实运行数据：运行时间、内存、客户端数、
+    // 会话分布与 OneBot 连接状态，替代旧的“页面打开时长”假指标。
+    async function refreshStats() {
+        try {
+            const s = await apiFetch('/api/admin/stats');
+            serverUptime = s.uptime_seconds || 0;
+            lastSync = Date.now();
+            $('uptimeDisplay').innerText = fmtUptime(serverUptime);
+            $('memDisplay').innerText = (s.runtime ? s.runtime.heap_alloc_mb : '—') + ' MB';
+
+            if (typeof s.clients === 'number') {
+                $('statClientCount').innerText = s.clients;
+                $('clientCountPill').innerText = s.clients;
+            }
+            const sess = s.sessions || {};
+            $('statSessionCount').innerText = sess.total || 0;
+            $('statSessionHint').innerText = '待核销 ' + (sess.pending || 0) + ' · 已验证 ' + (sess.verified || 0);
+
+            const bot = s.onebot || {};
+            const online = !!bot.connected;
+            const botBadge = $('statBotStatus');
+            botBadge.innerText = online ? '在线' : '离线';
+            botBadge.style.color = online ? 'var(--ai-success)' : 'var(--ai-danger)';
+            $('statBotHint').innerText = online
+                ? '连接数 ' + bot.connections + ' · 最近事件 ' + fmtTime(bot.last_event)
+                : 'NapCat 未接入反向 WS';
+
+            const dot = $('botDot');
+            if (dot) {
+                dot.textContent = online ? '🟢' : '⚪';
+                $('botStateText').innerText = online ? 'NapCatQQ 已接入' : 'NapCatQQ 未连接';
+                $('botStateMeta').innerText = online
+                    ? ('连接数 ' + bot.connections + ' · 接入于 ' + fmtTime(bot.last_connected) + ' · 最近事件 ' + fmtTime(bot.last_event))
+                    : (bot.last_disconnect ? '最近断开: ' + fmtTime(bot.last_disconnect) : '等待机器人接入 /ws/onebot');
+                const stateBadge = $('botStateBadge');
+                stateBadge.innerText = online ? 'ONLINE' : 'OFFLINE';
+                stateBadge.style.color = online ? 'var(--ai-success)' : 'var(--ai-danger)';
+            }
+        } catch (e) {
+            // 401 已在 apiFetch 内强制登出；其余轮询失败静默，避免错误刷屏
+            console.warn('[stats]', e.message);
+        }
+    }
+
+    // 两次轮询之间按本地时钟平滑插值运行时间，避免秒数 5 秒一跳。
     setInterval(() => {
-        let diff = Math.floor((Date.now() - startTime) / 1000);
-        let m = String(Math.floor(diff / 60) % 60).padStart(2, '0');
-        let s = String(diff % 60).padStart(2, '0');
-        let h = String(Math.floor(diff / 3600)).padStart(2, '0');
-        let el = document.getElementById('uptimeDisplay');
-        if (el) el.innerText = h + ':' + m + ':' + s;
+        if (serverUptime == null) return;
+        $('uptimeDisplay').innerText = fmtUptime(serverUptime + Math.floor((Date.now() - lastSync) / 1000));
     }, 1000);
+
+    // Escape 关闭弹窗
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        $('confirmModal').classList.add('hidden');
+        confirmHandler = null;
+        $('secretModal').classList.add('hidden');
+        $('editModal').classList.add('hidden');
+    });
 
     initCheck();
     </script>

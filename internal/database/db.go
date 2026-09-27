@@ -76,7 +76,11 @@ func migrate() error {
 			client_secret_hash TEXT NOT NULL,
 			client_name TEXT NOT NULL,
 			redirect_uris TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			display_name TEXT,
+			background_url TEXT,
+			prompt_text TEXT,
+			custom_css TEXT
 		);`,
 		`CREATE TABLE IF NOT EXISTS admin_users (
 			username TEXT PRIMARY KEY,
@@ -96,6 +100,33 @@ func migrate() error {
 	for _, q := range queries {
 		if _, err := WriteDB.Exec(q); err != nil {
 			return err
+		}
+	}
+
+	// v2 迁移：per-client 登录页品牌覆盖。旧库的 oidc_clients 没有这几列，
+	// CREATE TABLE IF NOT EXISTS 对已存在的表不生效，这里逐列幂等补齐。
+	// NULL / 空串 = 继承全局设置。
+	existing := map[string]bool{}
+	colRows, err := WriteDB.Query("PRAGMA table_info(oidc_clients)")
+	if err != nil {
+		return err
+	}
+	for colRows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt interface{}
+		if err := colRows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err == nil {
+			existing[name] = true
+		}
+	}
+	colRows.Close()
+
+	for _, col := range []string{"display_name", "background_url", "prompt_text", "custom_css"} {
+		if !existing[col] {
+			if _, err := WriteDB.Exec("ALTER TABLE oidc_clients ADD COLUMN " + col + " TEXT"); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -158,4 +189,21 @@ func SetSetting(key, val string) error {
 	}
 	settingsMu.Unlock()
 	return nil
+}
+
+// GetClientBranding 返回一个 OIDC 客户端的登录页品牌覆盖；未设置的字段为
+// 空串，由调用方回落到全局设置。这让同一个 OneAuth 可以给多个接入项目
+// 呈现各自不同的登录页。
+func GetClientBranding(clientID string) map[string]string {
+	out := map[string]string{"display_name": "", "background_url": "", "prompt_text": "", "custom_css": ""}
+	row := DB.QueryRow(`
+		SELECT COALESCE(display_name, ''), COALESCE(background_url, ''),
+		       COALESCE(prompt_text, ''), COALESCE(custom_css, '')
+		FROM oidc_clients WHERE client_id = ?`, clientID)
+	var dn, bg, pt, css string
+	if err := row.Scan(&dn, &bg, &pt, &css); err == nil {
+		out["display_name"], out["background_url"] = dn, bg
+		out["prompt_text"], out["custom_css"] = pt, css
+	}
+	return out
 }
