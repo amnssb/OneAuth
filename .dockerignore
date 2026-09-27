@@ -1,0 +1,27 @@
+# 版本控制与文档（与镜像无关，只拖慢构建上下文上传）
+.git
+.gitignore
+*.md
+LICENSE
+
+# 本机构建产物
+*.exe
+*.exe~
+tester.exe
+oneauth-linux-*
+*.dll
+*.so
+*.dylib
+
+# 本地数据与密钥（严禁进入构建上下文和镜像层）
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.pem
+*.key
+
+# 日志与临时文件
+*.log
+*.bak
+*.tmp
