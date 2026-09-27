@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -204,7 +205,46 @@ func initDemoClient() {
 	`, demoClientID, secretHash)
 }
 
+// currentScheme 与 getIssuer 同规则：反代告知 https 或原生 TLS 时用 https。
+func currentScheme(r *http.Request) string {
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		return "https"
+	}
+	return "http"
+}
+
+// demoRedirectMu 串行化演示客户端回调地址的“读-拼-写”，避免并发渲染
+// 时互相覆盖追加结果。
+var demoRedirectMu sync.Mutex
+
+// registerDemoRedirectURI 把当前访问来源的回调地址并入演示客户端的注册
+// 列表。演示页的 redirect_uri 必须与浏览器实际地址一致 —— 否则核销后的
+// 授权码会被送到别处（例如用户本机也跑着一个 OneAuth 的 localhost:9000），
+// /token 换取时就会 invalid_grant。
+func registerDemoRedirectURI(callback string) {
+	demoRedirectMu.Lock()
+	defer demoRedirectMu.Unlock()
+
+	var uris string
+	if err := database.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE client_id = ?", demoClientID).Scan(&uris); err != nil {
+		return
+	}
+	for _, uri := range strings.Split(uris, ",") {
+		if strings.TrimSpace(uri) == callback {
+			return
+		}
+	}
+	_, _ = database.WriteDB.Exec("UPDATE oidc_clients SET redirect_uris = ? WHERE client_id = ?",
+		uris+","+callback, demoClientID)
+}
+
 func handleDemoPage(w http.ResponseWriter, r *http.Request) {
+	callback := fmt.Sprintf("%s://%s/demo/callback", currentScheme(r), r.Host)
+	registerDemoRedirectURI(callback)
+	authorizeURL := "/authorize?client_id=" + demoClientID +
+		"&redirect_uri=" + url.QueryEscape(callback) +
+		"&response_type=code&scope=openid+profile+email"
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -305,7 +345,7 @@ func handleDemoPage(w http.ResponseWriter, r *http.Request) {
             <div class="feature-item"><span>👤</span> <span>自动同步 QQ 号与 QQ 头像个人资料</span></div>
         </div>
 
-        <a class="btn-login" href="/authorize?client_id=oneauth_demo_app&redirect_uri=http://localhost:9000/demo/callback&response_type=code&scope=openid+profile+email">
+        <a class="btn-login" href="{{.AuthorizeURL}}">
             <span>🚀 体验 QQ 群验证码登录</span>
         </a>
 
@@ -313,6 +353,8 @@ func handleDemoPage(w http.ResponseWriter, r *http.Request) {
     </div>
 </body>
 </html>`
+	// 占位符替换而非 fmt.Sprintf：页面 CSS 含大量 %%，替换法不会误伤。
+	html = strings.Replace(html, "{{.AuthorizeURL}}", authorizeURL, 1)
 	_, _ = w.Write([]byte(html))
 }
 
@@ -334,7 +376,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "localhost:9000"
 	}
-	tokenURL := fmt.Sprintf("http://%s/token", host)
+	tokenURL := fmt.Sprintf("%s://%s/token", currentScheme(r), host)
 
 	resp, err := callbackClient.PostForm(tokenURL, tokenForm)
 	if err != nil {
@@ -348,6 +390,89 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &tokenData)
 
 	idToken, _ := tokenData["id_token"].(string)
+
+	// 换取失败必须如实展示：此前错误响应也会被渲染成“登录授权成功”，
+	// 例如授权码被送到了另一个实例（demo 的 redirect_uri 与访问地址不一致
+	// 时的典型症状），排查方向完全被误导。
+	if idToken == "" {
+		errCode, _ := tokenData["error"].(string)
+		if errCode == "" {
+			errCode = fmt.Sprintf("http_%d", resp.StatusCode)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>令牌换取失败 - 业务系统</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: #060813;
+            color: #94a3b8;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .err-card {
+            background: rgba(19, 26, 53, 0.65);
+            border: 1px solid rgba(239, 68, 68, 0.35);
+            backdrop-filter: blur(28px);
+            border-radius: 28px;
+            padding: 44px 38px;
+            max-width: 560px;
+            width: 100%%;
+            text-align: center;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+        }
+        h1 { font-size: 1.6rem; font-weight: 800; color: #f8fafc; margin-bottom: 10px; }
+        .err-badge {
+            display: inline-block;
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            font-weight: 700;
+            padding: 4px 16px;
+            border-radius: 20px;
+            margin-bottom: 22px;
+        }
+        p { font-size: 0.92rem; line-height: 1.7; margin-bottom: 10px; }
+        .hint { color: #64748b; font-size: 0.84rem; }
+        .btn-again {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 26px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #f8fafc;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .btn-again:hover { background: rgba(255, 255, 255, 0.15); }
+    </style>
+</head>
+<body>
+    <div class="err-card">
+        <h1>令牌换取失败</h1>
+        <div class="err-badge">%s</div>
+        <p>演示应用拿授权码回换 Token 时被 OneAuth 拒绝。</p>
+        <p class="hint">常见原因：授权码已被消费或过期；回调地址与发起授权的站点不一致（如授权码被送达了另一个 OneAuth 实例）。</p>
+        <a class="btn-again" href="/demo">🔄 重新发起测试</a>
+    </div>
+</body>
+</html>`, template.HTMLEscapeString(errCode))
+		_, _ = w.Write([]byte(html))
+		return
+	}
 
 	// 解析 JWT payload 展示 QQ 信息
 	var qqNumber string
