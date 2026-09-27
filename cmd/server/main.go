@@ -65,13 +65,33 @@ func main() {
 	// 静态资源服务
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
-	// 登录页面
+	// 登录页面：品牌按发起登录的客户端逐项覆盖（display_name/background_url/
+	// prompt_text/custom_css），未设置的字段回落到全局设置 —— 同一个 OneAuth
+	// 服务多个项目时，各项目呈现各自的登录页。
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := r.URL.Query().Get("session_id")
 		sess, exists := session.DefaultManager.GetSession(sessionID)
 		if !exists {
 			http.Error(w, "会话不存在或已过期", http.StatusBadRequest)
 			return
+		}
+
+		branding := database.GetClientBranding(sess.ClientID)
+		siteName := branding["display_name"]
+		if siteName == "" {
+			siteName = database.GetSetting("site_name", "统一身份认证中心")
+		}
+		background := branding["background_url"]
+		if background == "" {
+			background = database.GetSetting("background_url", "")
+		}
+		prompt := branding["prompt_text"]
+		if prompt == "" {
+			prompt = database.GetSetting("prompt_text", "请发送验证码至群")
+		}
+		customCSS := branding["custom_css"]
+		if customCSS == "" {
+			customCSS = database.GetSetting("custom_css", "")
 		}
 
 		ttlStr := database.GetSetting("code_ttl", "180")
@@ -81,10 +101,10 @@ func main() {
 			"SessionID":     sess.SessionID,
 			"VerifyCode":    sess.VerifyCode,
 			"GroupID":       database.GetSetting("target_group_id", ""),
-			"SiteName":      database.GetSetting("site_name", "统一身份认证中心"),
-			"PromptText":    database.GetSetting("prompt_text", "请发送验证码至群"),
-			"BackgroundURL": database.GetSetting("background_url", ""),
-			"CustomCSS":     template.CSS(database.GetSetting("custom_css", "")),
+			"SiteName":      siteName,
+			"PromptText":    prompt,
+			"BackgroundURL": background,
+			"CustomCSS":     template.CSS(customCSS),
 			"TTL":           ttl,
 		}
 		if err := loginTmpl.Execute(w, data); err != nil {
@@ -93,11 +113,11 @@ func main() {
 	})
 
 	// 管理后台页面
-	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /admin", admin.SecureHeaders(func(w http.ResponseWriter, r *http.Request) {
 		if err := adminTmpl.Execute(w, nil); err != nil {
 			log.Printf("[模板渲染] 管理后台渲染失败: %v\n", err)
 		}
-	})
+	}))
 
 	// 预置或确保 Demo 测试应用存在
 	initDemoClient()

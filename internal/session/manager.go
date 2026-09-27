@@ -197,6 +197,33 @@ func (m *Manager) GetSession(sessionID string) (*AuthSession, bool) {
 	return session, exists
 }
 
+// SessionStats 是内存会话按状态分布的快照，供管理后台概览轮询展示。
+type SessionStats struct {
+	Pending  int
+	Verified int
+	Consumed int
+	Total    int
+}
+
+func (m *Manager) Stats() SessionStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var s SessionStats
+	for _, sess := range m.sessions {
+		switch sess.Status {
+		case StatusPending:
+			s.Pending++
+		case StatusVerified:
+			s.Verified++
+		case StatusConsumed:
+			s.Consumed++
+		}
+		s.Total++
+	}
+	return s
+}
+
 func (m *Manager) startCleaner() {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
