@@ -191,12 +191,34 @@ Docker Compose 能够**一行命令同时启动两个容器**：
 
 ---
 
-#### 一键启动（默认网页扫码登录，零配置）：
-直接在终端执行：
+#### 步骤 1：拉取仓库并一键启动（复制即用）
+以下命令从一台全新服务器开始，整段复制粘贴执行即可：
+
 ```bash
+# （可选）全新服务器先安装 Docker 与 Git（已装过可跳过）
+curl -fsSL https://get.docker.com | bash && apt-get install -y git
+
+# 1. 拉取仓库
+git clone https://github.com/amnssb/OneAuth.git
+
+# 2. 进入项目目录
+cd OneAuth
+
+# 3. 构建镜像并启动 oneauth + napcat 两个容器
 docker compose up -d --build
 ```
+
+也可以一行搞定：
+
+```bash
+git clone https://github.com/amnssb/OneAuth.git && cd OneAuth && docker compose up -d --build
+```
+
 > 启动后，浏览器访问 `http://<服务器IP>:6099/webui` 即可直接扫码登录任意 QQ 号，无需预填任何账号喵！
+
+> **国内服务器拉取卡住？**（长时间停在 `go mod download` 或镜像拉取无进度）
+> - Go 模块拉取慢：改用国内代理构建 —— `GOPROXY=https://goproxy.cn,direct docker compose up -d --build`
+> - Docker 镜像拉取慢：编辑 `/etc/docker/daemon.json` 配置 `registry-mirrors` 镜像加速后 `systemctl restart docker`；或先手动 `docker pull mlikiowa/napcat-docker:latest`、`docker pull golang:1.22-alpine`、`docker pull alpine:3.20`，三个镜像就位后再执行 `docker compose up -d --build`（已拉取的镜像不会重复下载）
 
 ---
 
@@ -210,6 +232,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 构建期拉取 Go 模块的代理，国内可用环境变量覆盖：
+        #   GOPROXY=https://goproxy.cn,direct docker compose up -d --build
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     container_name: oneauth
     restart: unless-stopped
     ports:
@@ -251,12 +277,12 @@ networks:
 
 ---
 
-#### 步骤 2：一条命令构建并启动
-在项目根目录下执行：
+#### 步骤 2：更新已有部署
+在项目目录下执行（改动代码后重新发布）：
 ```bash
-docker compose up -d --build
+cd OneAuth && git pull && docker compose up -d --build
 ```
-> **说明**：首次运行会自动根据 `Dockerfile` 打包仅约 30MB 的 OneAuth 极小镜像，并自动拉取 NapCatQQ 镜像。
+> **说明**：首次运行会自动根据 `Dockerfile` 打包仅约 30MB 的 OneAuth 极小镜像；Go 依赖与基础镜像均有构建缓存，只会重新编译有改动的部分，不会每次都重新拉取。
 
 ---
 

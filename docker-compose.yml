@@ -6,6 +6,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 构建期拉取 Go 模块的代理，可用环境变量覆盖：
+        #   GOPROXY=https://goproxy.cn,direct docker compose up -d --build
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     container_name: oneauth
     restart: unless-stopped
     ports:

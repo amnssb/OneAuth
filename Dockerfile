@@ -1,6 +1,12 @@
 # 编译阶段
 FROM golang:1.22-alpine AS builder
 
+# 拉取 Go 模块使用的代理。国内服务器构建时覆盖为：
+#   docker compose build --build-arg GOPROXY=https://goproxy.cn,direct
+# 或通过环境变量：GOPROXY=https://goproxy.cn,direct docker compose up -d --build
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
 WORKDIR /build
 RUN apk add --no-cache git ca-certificates tzdata
 
