@@ -27,7 +27,7 @@ services:
     environment:
       - NAPCAT_GID=0
       - NAPCAT_UID=0
-      - ACCOUNT=123456789  # 替换为你的机器人 QQ 号
+      - ACCOUNT=${BOT_QQ:-}  # 可直接通过命令行传参: BOT_QQ=你的QQ号 docker compose up -d
     volumes:
       - napcat-data:/app/.config/QQ
       - napcat-config:/app/napcat/config

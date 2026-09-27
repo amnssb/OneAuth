@@ -191,9 +191,24 @@ Docker Compose 能够**一行命令同时启动两个容器**：
 
 ---
 
-#### 步骤 1：准备与修改配置文件
-在项目根目录编辑 [docker-compose.yml](file:///D:/amnssb/Documents/OneAuth/docker-compose.yml)：
-将 `ACCOUNT` 改为你准备作为机器人的 QQ 号：
+#### 启动方式（无需改文件，直接命令行传参）：
+在终端中直接把 QQ 号传给环境变量启动：
+
+**Linux / macOS:**
+```bash
+BOT_QQ=你的机器人QQ号 docker compose up -d --build
+```
+
+**Windows PowerShell:**
+```powershell
+$env:BOT_QQ="你的机器人QQ号"; docker compose up -d --build
+```
+
+> 💡 **免填说明**：即使启动时不传 QQ 号，也可以直接运行 `docker compose up -d --build`，稍后直接打开 `http://<服务器IP>:6099/webui` 网页扫码登录任意 QQ 号即可喵！
+
+---
+
+#### 完整的 `docker-compose.yml` 结构预览：
 ```yaml
 version: '3.8'
 
@@ -224,7 +239,7 @@ services:
     environment:
       - NAPCAT_GID=0
       - NAPCAT_UID=0
-      - ACCOUNT=123456789      # ⚠️ 替换为你自己的机器人 QQ 号
+      - ACCOUNT=${BOT_QQ:-}   # 支持通过参数传入，不填则默认扫码
     volumes:
       - napcat-data:/app/.config/QQ
       - napcat-config:/app/napcat/config
