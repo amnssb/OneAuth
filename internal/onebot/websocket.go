@@ -25,20 +25,22 @@ var codeRegex = regexp.MustCompile("^[2-9A-HJ-NP-Z]{6}$")
 var codeSearchRegex = regexp.MustCompile(`[2-9A-HJ-NP-Z]{6}`)
 var cqRegex = regexp.MustCompile(`\[CQ:[^\]]+\]`)
 
+const (
+	// 单帧上限，防止恶意超大报文占用内存
+	wsReadLimit = 1 << 20
+	// 每连接事件队列上限：处理是有序单消费者，队列满说明机器人流量异常突增，
+	// 此时丢弃新事件（验证码消息可由用户重发）而不是无界堆积内存。
+	eventQueueLen = 256
+)
+
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	token := database.GetSetting("onebot_token", "")
 	if token != "" {
 		auth := r.Header.Get("Authorization")
 		queryToken := r.URL.Query().Get("access_token")
-		valid := false
-		if auth == "Bearer "+token {
-			valid = true
-		} else if queryToken == token {
-			valid = true
-		}
-
+		valid := auth == "Bearer "+token || queryToken == token
 		if !valid {
-			log.Printf("[OneBot] 401 Unauthorized WS attempt. Expected '%s', got auth='%s', query='%s'", token, auth, queryToken)
+			log.Printf("[OneBot] 401 Unauthorized WS attempt from %s", r.RemoteAddr)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -50,16 +52,34 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(wsReadLimit)
 
 	log.Println("OneBot WebSocket connected:", r.RemoteAddr)
+
+	events := make(chan []byte, eventQueueLen)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		// 单消费者按序处理：群消息事件之间保持到达顺序，
+		// 同时把"每事件一个 goroutine"的无界并发改为固定 1 + 缓冲队列。
+		for msg := range events {
+			processEvent(msg)
+		}
+	}()
 
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Println("OneBot WebSocket disconnected:", r.RemoteAddr, err)
-			break
+			close(events)
+			<-workerDone
+			return
 		}
-		go processEvent(message)
+		select {
+		case events <- message:
+		default:
+			log.Println("[OneBot] 事件队列已满，丢弃本条事件（等待机器人侧重发）")
+		}
 	}
 }
 
@@ -121,9 +141,9 @@ func processEvent(raw []byte) {
 		}
 	}
 
-	// Filter: if group doesn't match target, return
+	// 心跳回显、私聊、notice/request 事件、非目标群消息：与验证码无关，
+	// 静默忽略，不再打 "Ignored message" 刷屏。
 	if groupID == "" || userID == "" || groupID != targetGroupID {
-		log.Printf("[OneBot] Ignored message: group='%s' (target='%s'), user='%s', text='%s'", groupID, targetGroupID, userID, text)
 		return
 	}
 
@@ -132,7 +152,8 @@ func processEvent(raw []byte) {
 	if selfSent {
 		origin = "self/admin"
 	}
-	log.Printf("[OneBot] Received target group message: '%s' from user: '%s' (%s)", text, userID, origin)
+	log.Printf("[OneBot] Received target group message: '%s' from user: '%s' (%s)", loggable(text), userID, origin)
+
 	if codeRegex.MatchString(text) {
 		sess, ok := session.DefaultManager.VerifyCode(text, userID)
 		if ok {
@@ -142,17 +163,29 @@ func processEvent(raw []byte) {
 		}
 		return
 	}
+
 	// Not a bare code: look for one inside the sentence. Longest match first
 	// so a message that quotes two codes consumes the last one actually sent.
 	if match := codeSearchRegex.FindAllString(text, -1); len(match) > 0 {
 		candidate := match[len(match)-1]
-		log.Printf("[OneBot] Extracted candidate code '%s' from '%s'", candidate, text)
 		if sess, ok := session.DefaultManager.VerifyCode(candidate, userID); ok {
 			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → QQ: %s | Session: %s\n", candidate, userID, sess.SessionID)
 			return
 		}
+		// 提取出的候选未命中：多为普通聊天或长报文里的大写串（UUID、单号等），
+		// 属正常流量，静默返回，不再打 "未命中正则" 日志。
 	}
-	log.Printf("[OneBot] ✗ 消息未命中验证码格式正则: '%s'", text)
+}
+
+// loggable 把日志里的消息压成单行并截断，避免长报文（如机器人转发的错误报告）
+// 打满日志。
+func loggable(text string) string {
+	oneLine := strings.ReplaceAll(strings.ReplaceAll(text, "\r", " "), "\n", " ")
+	runes := []rune(oneLine)
+	if len(runes) > 100 {
+		return string(runes[:100]) + "…"
+	}
+	return oneLine
 }
 
 func extractTextV11(event map[string]interface{}) string {

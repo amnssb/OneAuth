@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,8 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"oneauth/internal/admin"
 	"oneauth/internal/database"
@@ -112,7 +116,46 @@ func main() {
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
 	log.Printf("🔗 OIDC 发现 → http://localhost:%s/.well-known/openid-configuration\n", port)
 	log.Printf("🤖 OneBot WS → ws://localhost:%s/ws/onebot\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+
+	// 显式配置 Server：ReadHeaderTimeout 防 Slowloris 慢连接占用；
+	// 不设 WriteTimeout（会掐断 SSE 长连接），空闲回收交给 IdleTimeout。
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       75 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	// 优雅停机：等待在途请求（含 SSE 等待核销的长连接）最多 10s
+	go func() {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		<-stop
+		log.Println("🛑 收到退出信号，正在优雅停机...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[停机] 强制退出: %v", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[启动失败] HTTP 服务异常: %v", err)
+	}
+	log.Println("OneAuth 已停止")
+}
+
+// callbackClient 供 demo 回调自调用 /token 使用：复用 TCP 连接，
+// 避免 http.PostForm 默认 Transport 每次新建连接。
+var callbackClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	},
 }
 
 func getEnv(key, defaultVal string) string {
@@ -130,7 +173,7 @@ const (
 func initDemoClient() {
 	h := sha256.Sum256([]byte(demoClientSecret))
 	secretHash := base64.RawURLEncoding.EncodeToString(h[:])
-	_, _ = database.DB.Exec(`
+	_, _ = database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris)
 		VALUES (?, ?, 'OneAuth 内置体验应用', 'http://localhost:9000/demo/callback,http://127.0.0.1:9000/demo/callback')
 		ON CONFLICT(client_id) DO UPDATE SET redirect_uris = excluded.redirect_uris
@@ -269,7 +312,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenURL := fmt.Sprintf("http://%s/token", host)
 
-	resp, err := http.PostForm(tokenURL, tokenForm)
+	resp, err := callbackClient.PostForm(tokenURL, tokenForm)
 	if err != nil {
 		http.Error(w, "换取令牌失败: "+err.Error(), http.StatusInternalServerError)
 		return
