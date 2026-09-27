@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"math/big"
 	"sync"
 	"time"
 )
@@ -31,6 +30,12 @@ type AuthSession struct {
 	NotifyChan    chan struct{}
 }
 
+// 并发约定：session 发布到 map 之后，
+//   - SessionID/ClientID/RedirectURI/State/CodeChallenge/VerifyCode/ExpiresAt/
+//     NotifyChan 不可变，处理器（如 SSE）可无锁读取或等待 NotifyChan；
+//   - QQNumber/Status/AuthCode 仅在 Manager.mu 写锁下读写，
+//     处理器不得直接访问（统一走 Manager 的方法）。
+
 type Manager struct {
 	mu            sync.RWMutex
 	sessions      map[string]*AuthSession
@@ -52,6 +57,11 @@ func NewManager() *Manager {
 
 const charset = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 
+const (
+	charsetLen    = 31        // len(charset)
+	maxAcceptByte = byte(248) // 256 - 256%31：拒绝采样上限，保证到字符集的映射均匀
+)
+
 func generateRandomHex(length int) (string, error) {
 	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
@@ -60,25 +70,25 @@ func generateRandomHex(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// generateUniqueCode generates a unique verification code.
-// MUST be called with m.mu held (write lock).
-func (m *Manager) generateUniqueCode(length int) (string, error) {
-	for i := 0; i < 100; i++ {
-		code := make([]byte, length)
-		for j := 0; j < length; j++ {
-			idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
-			if err != nil {
-				return "", err
-			}
-			code[j] = charset[idx.Int64()]
+// randomCode 一次 rand.Read 取足随机字节并映射到字符集（拒绝采样消除模偏差），
+// 替代原先每个字符一次 rand.Int + big.Int 分配的写法。
+func randomCode(length int) (string, error) {
+	out := make([]byte, 0, length)
+	for len(out) < length {
+		buf := make([]byte, length)
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
 		}
-		strCode := string(code)
-
-		if _, exists := m.codeIndex[strCode]; !exists {
-			return strCode, nil
+		for _, b := range buf {
+			if b < maxAcceptByte {
+				out = append(out, charset[b%charsetLen])
+				if len(out) == length {
+					break
+				}
+			}
 		}
 	}
-	return "", errors.New("failed to generate unique code after 100 attempts")
+	return string(out), nil
 }
 
 func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, ttlSeconds int) (*AuthSession, error) {
@@ -90,27 +100,33 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	code, err := m.generateUniqueCode(6)
-	if err != nil {
-		return nil, err
+	for i := 0; i < 100; i++ {
+		code, err := randomCode(6)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := m.codeIndex[code]; exists {
+			continue
+		}
+
+		session := &AuthSession{
+			SessionID:     sessionID,
+			ClientID:      clientID,
+			RedirectURI:   redirectURI,
+			State:         state,
+			CodeChallenge: challenge,
+			VerifyCode:    code,
+			Status:        StatusPending,
+			ExpiresAt:     time.Now().Add(time.Duration(ttlSeconds) * time.Second),
+			NotifyChan:    make(chan struct{}),
+		}
+
+		m.sessions[sessionID] = session
+		m.codeIndex[code] = session
+
+		return session, nil
 	}
-
-	session := &AuthSession{
-		SessionID:     sessionID,
-		ClientID:      clientID,
-		RedirectURI:   redirectURI,
-		State:         state,
-		CodeChallenge: challenge,
-		VerifyCode:    code,
-		Status:        StatusPending,
-		ExpiresAt:     time.Now().Add(time.Duration(ttlSeconds) * time.Second),
-		NotifyChan:    make(chan struct{}),
-	}
-
-	m.sessions[sessionID] = session
-	m.codeIndex[code] = session
-
-	return session, nil
+	return nil, errors.New("failed to generate unique code after 100 attempts")
 }
 
 func (m *Manager) VerifyCode(code, qqNumber string) (*AuthSession, bool) {
@@ -128,7 +144,7 @@ func (m *Manager) VerifyCode(code, qqNumber string) (*AuthSession, bool) {
 
 	session.QQNumber = qqNumber
 	session.Status = StatusVerified
-	
+
 	delete(m.codeIndex, code)
 	close(session.NotifyChan)
 
@@ -183,6 +199,7 @@ func (m *Manager) GetSession(sessionID string) (*AuthSession, bool) {
 
 func (m *Manager) startCleaner() {
 	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
 	for range ticker.C {
 		m.mu.Lock()
 		now := time.Now()

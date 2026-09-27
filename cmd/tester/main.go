@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 )
 
 const (
-	oneAuthHost  = "localhost:9000"
 	wsToken      = "2rZY778PKgCO6ljZ"
 	targetGroup  = 309623044
 	testQQ       = 100000001
@@ -23,7 +23,17 @@ const (
 	clientSecret = "iuH6nsEJQs93H0hEZUsAkWyLQsS0cW3A9fUU_Zn4Gp8="
 )
 
+// oneAuthHost 可用环境变量 ONEAUTH_HOST 覆盖（默认 localhost:9000），
+// 便于在测试端口上冒烟。
+func resolveHost() string {
+	if h := os.Getenv("ONEAUTH_HOST"); h != "" {
+		return h
+	}
+	return "localhost:9000"
+}
+
 func main() {
+	oneAuthHost := resolveHost()
 	fmt.Println("==================================================")
 	fmt.Println("🚀 OneAuth 全链路端到端模拟核验测试")
 	fmt.Println("==================================================")

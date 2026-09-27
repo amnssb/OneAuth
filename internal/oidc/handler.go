@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -321,17 +322,32 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
 
-	select {
-	case <-sess.NotifyChan:
-		fmt.Fprintf(w, "data: {\"status\":\"verified\",\"redirect\":\"/api/session/callback?session_id=%s\"}\n\n", sessionID)
-		flusher.Flush()
-	case <-r.Context().Done():
-		return
-	case <-time.After(time.Until(sess.ExpiresAt)):
-		fmt.Fprintf(w, "data: {\"status\":\"expired\"}\n\n")
-		flusher.Flush()
+	// 周期性 keepalive 注释行，防止空闲 SSE 长连接被代理/负载均衡掐断；
+	// 大量并发登录页各挂一条 SSE 时尤其重要。
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+	deadline := time.NewTimer(time.Until(sess.ExpiresAt))
+	defer deadline.Stop()
+
+	for {
+		select {
+		case <-sess.NotifyChan:
+			fmt.Fprintf(w, "data: {\"status\":\"verified\",\"redirect\":\"/api/session/callback?session_id=%s\"}\n\n", sessionID)
+			flusher.Flush()
+			return
+		case <-r.Context().Done():
+			return
+		case <-deadline.C:
+			fmt.Fprintf(w, "data: {\"status\":\"expired\"}\n\n")
+			flusher.Flush()
+			return
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
 	}
 }
 
@@ -396,5 +412,5 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 func checkPasswordHash(password, hash string) bool {
 	h := sha256.Sum256([]byte(password))
 	computed := base64.RawURLEncoding.EncodeToString(h[:])
-	return computed == hash
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) == 1
 }

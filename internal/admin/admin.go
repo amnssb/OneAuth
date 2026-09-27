@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -19,7 +21,74 @@ type adminClaims struct {
 	Exp      int64
 }
 
-var adminSessions = make(map[string]*adminClaims)
+// adminSessions 是普通 map，被并发的登录/鉴权请求读写（authMiddleware 还会
+// 删除过期项），必须加锁，否则是数据竞争。过期项由 janitor 周期清理。
+type adminSessionStore struct {
+	mu       sync.RWMutex
+	sessions map[string]*adminClaims
+}
+
+var adminStore = newAdminStore()
+
+func newAdminStore() *adminSessionStore {
+	s := &adminSessionStore{sessions: make(map[string]*adminClaims)}
+	go s.janitor()
+	return s
+}
+
+func (s *adminSessionStore) put(token string, claims *adminClaims) {
+	s.mu.Lock()
+	s.sessions[token] = claims
+	s.mu.Unlock()
+}
+
+func (s *adminSessionStore) get(token string) (*adminClaims, bool) {
+	s.mu.RLock()
+	claim, ok := s.sessions[token]
+	s.mu.RUnlock()
+	if ok && time.Now().Unix() > claim.Exp {
+		s.delete(token)
+		return nil, false
+	}
+	return claim, ok
+}
+
+func (s *adminSessionStore) delete(token string) {
+	s.mu.Lock()
+	delete(s.sessions, token)
+	s.mu.Unlock()
+}
+
+func (s *adminSessionStore) janitor() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now().Unix()
+		s.mu.Lock()
+		for token, claim := range s.sessions {
+			if now > claim.Exp {
+				delete(s.sessions, token)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// bcrypt 是 CPU 密集操作（DefaultCost 约 50~100ms），无限制地并发执行会被
+// 登录接口打满 CPU。信号量把同时进行的哈希/比对限制在核数以内。
+var bcryptSlots = make(chan struct{}, max(2, runtime.NumCPU()))
+
+func bcryptCompare(hash, password []byte) error {
+	bcryptSlots <- struct{}{}
+	defer func() { <-bcryptSlots }()
+	return bcrypt.CompareHashAndPassword(hash, password)
+}
+
+func bcryptHash(password []byte) ([]byte, error) {
+	bcryptSlots <- struct{}{}
+	defer func() { <-bcryptSlots }()
+	return bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
+}
 
 func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/login", handleAdminLogin)
@@ -49,28 +118,21 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+	if err := bcryptCompare([]byte(hash), []byte(req.Password)); err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	token := generateToken()
-	adminSessions[token] = &adminClaims{
+	adminStore.put(token, &adminClaims{
 		Username: req.Username,
 		Exp:      time.Now().Add(24 * time.Hour).Unix(),
-	}
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
 }
 
 func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
-	var count int
-	err := database.DB.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count)
-	if err != nil || count > 0 {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -85,15 +147,24 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcryptHash([]byte(req.Password))
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 
-	_, err = database.DB.Exec("INSERT INTO admin_users (username, password_hash) VALUES (?, ?)", req.Username, string(hash))
+	// “检查是否已有管理员”和“插入”合并成一条语句，消除两个并发 setup
+	// 同时通过 COUNT 检查的竞态；username 主键兜底。
+	res, err := database.WriteDB.Exec(`
+		INSERT INTO admin_users (username, password_hash)
+		SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM admin_users)
+	`, req.Username, string(hash))
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -134,7 +205,9 @@ func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 
 	for k, v := range req {
 		if allowedKeys[k] {
-			database.SetSetting(k, v)
+			if err := database.SetSetting(k, v); err != nil {
+				log.Printf("[管理后台] 写入设置 %s 失败: %v", k, err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -142,7 +215,7 @@ func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 
 func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claim, ok := adminSessions[auth]
+	claim, ok := adminStore.get(auth)
 	if !ok || claim.Username == "" {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -169,18 +242,18 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.OldPassword)); err != nil {
+	if err := bcryptCompare([]byte(hash), []byte(req.OldPassword)); err != nil {
 		http.Error(w, "原密码错误", http.StatusForbidden)
 		return
 	}
 
-	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	newHash, err := bcryptHash([]byte(req.NewPassword))
 	if err != nil {
 		http.Error(w, "加密错误", http.StatusInternalServerError)
 		return
 	}
 
-	_, err = database.DB.Exec("UPDATE admin_users SET password_hash = ? WHERE username = ?", string(newHash), claim.Username)
+	_, err = database.WriteDB.Exec("UPDATE admin_users SET password_hash = ? WHERE username = ?", string(newHash), claim.Username)
 	if err != nil {
 		http.Error(w, "更新失败", http.StatusInternalServerError)
 		return
@@ -235,7 +308,7 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	hash := sha256.Sum256([]byte(clientSecret))
 	secretHash := base64.RawURLEncoding.EncodeToString(hash[:])
 
-	_, err := database.DB.Exec("INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris) VALUES (?, ?, ?, ?)",
+	_, err := database.WriteDB.Exec("INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris) VALUES (?, ?, ?, ?)",
 		clientID, secretHash, req.ClientName, req.RedirectURIs)
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -257,7 +330,7 @@ func handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := database.DB.Exec("DELETE FROM oidc_clients WHERE client_id = ?", id)
+	_, err := database.WriteDB.Exec("DELETE FROM oidc_clients WHERE client_id = ?", id)
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
@@ -275,14 +348,13 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 
-		claim, ok := adminSessions[token]
+		claim, ok := adminStore.get(token)
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if time.Now().Unix() > claim.Exp {
-			delete(adminSessions, token)
+		if claim.Username == "" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
