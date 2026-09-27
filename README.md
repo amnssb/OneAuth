@@ -181,22 +181,34 @@ sudo systemctl status oneauth
 
 ---
 
-### 3.3 Docker / Docker Compose 部署
+### 3.3 Docker / Docker Compose 一键部署
 
-根目录下预置了 `Dockerfile` 和 `docker-compose.yml`，可一键拉起 OneAuth 与 NapCatQQ。
+Docker Compose 能够**一行命令同时启动两个容器**：
+1. **`oneauth` 容器**：OIDC 认证中心核心服务（对外暴露 `9000` 端口）。
+2. **`napcat` 容器**：NapCatQQ 机器人容器（官方无头 Linux QQ，对外暴露 `6099` WebUI 端口用于扫码登录 QQ）。
 
+两个容器通过内置虚拟网络 `oneauth-net` 互联通信，NapCat 直接通过内部网络地址 `ws://oneauth:9000/ws/onebot` 上报消息，无需暴露额外内网端口。
+
+---
+
+#### 步骤 1：准备与修改配置文件
+在项目根目录编辑 [docker-compose.yml](file:///D:/amnssb/Documents/OneAuth/docker-compose.yml)：
+将 `ACCOUNT` 改为你准备作为机器人的 QQ 号：
 ```yaml
 version: '3.8'
 
 services:
   oneauth:
-    build: .
+    image: oneauth:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: oneauth
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "9000:9000"           # 访问管理后台和 OIDC 的宿主机端口
     volumes:
-      - ./data:/data
+      - oneauth-data:/data     # 持久化存储 SQLite 数据库与 RSA 私钥
     environment:
       - TZ=Asia/Shanghai
       - PORT=9000
@@ -212,26 +224,77 @@ services:
     environment:
       - NAPCAT_GID=0
       - NAPCAT_UID=0
-      - ACCOUNT=123456789  # 你的机器人 QQ 号
+      - ACCOUNT=123456789      # ⚠️ 替换为你自己的机器人 QQ 号
     volumes:
-      - ./napcat-data:/app/.config/QQ
-      - ./napcat-config:/app/napcat/config
+      - napcat-data:/app/.config/QQ
+      - napcat-config:/app/napcat/config
     ports:
-      - "6099:6099"  # NapCat WebUI 扫码控制台
+      - "6099:6099"           # 浏览器访问此端口扫码登录 QQ
     networks:
       - oneauth-net
 
 volumes:
   oneauth-data:
+  napcat-data:
+  napcat-config:
 
 networks:
   oneauth-net:
     driver: bridge
 ```
 
-启动容器：
+---
+
+#### 步骤 2：一条命令构建并启动
+在项目根目录下执行：
 ```bash
 docker compose up -d --build
+```
+> **说明**：首次运行会自动根据 `Dockerfile` 打包仅约 30MB 的 OneAuth 极小镜像，并自动拉取 NapCatQQ 镜像。
+
+---
+
+#### 步骤 3：扫码登录机器人 QQ
+1. 打开浏览器访问：`http://<服务器IP>:6099/webui`
+2. 使用手机 QQ 扫描网页中的二维码，确认机器人 QQ 账号登录。
+
+---
+
+#### 步骤 4：在 NapCat 中配置反向 WebSocket 连接
+机器人登录成功后，在 NapCat 的 WebUI 配置页面中：
+1. 点击 **网络配置** → **添加反向 WebSocket**。
+2. 填入参数：
+   - **连接地址 (URL)**：`ws://oneauth:9000/ws/onebot`（⚠️ 注意：容器间通信直接写容器名 `oneauth` 即可，**不要**写 `localhost`）
+   - **Access Token**：填写在 OneAuth 控制台中设置的 `onebot_token`（如果设置了的话）
+   - **重连时间**：`3000` 毫秒
+3. 保存并启用配置。
+
+---
+
+#### 步骤 5：进入 OneAuth 管理后台完成初始化
+1. 打开浏览器访问：`http://<服务器IP>:9000/admin`
+2. 首次登录账号为 `admin`，密码为 `admin123`（进入后可在「安全中心」修改）。
+3. 在「OneBot 节点」页面将**目标审核 QQ 群号**设置为你的目标群号。
+4. 部署完毕！现在在业务系统中（如 Gitea）点击 QQ 登录，群内发验证码即可完成跳转。
+
+---
+
+#### 常用维护命令
+```bash
+# 查看所有容器运行状态
+docker compose ps
+
+# 查看 OneAuth 实时运行日志
+docker compose logs -f oneauth
+
+# 查看 NapCat 机器人运行日志
+docker compose logs -f napcat
+
+# 停止并退出所有容器
+docker compose down
+
+# 重启服务
+docker compose restart
 ```
 
 ---
