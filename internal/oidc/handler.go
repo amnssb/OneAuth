@@ -1,19 +1,16 @@
 package oidc
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,45 +22,11 @@ import (
 	"oneauth/internal/session"
 )
 
-var (
-	privateKey *rsa.PrivateKey
-	publicKey  *rsa.PublicKey
-	kid        string
-)
-
-// InitKeys initializes RSA keys for signing JWTs.
+// InitKeys 保留为兼容旧调用入口的空操作：多 Issuer 强制迁移后，签名密钥
+// 一律按 issuer_slug 从 SQLite 惰性加载/生成（见 keys.go），不再使用全局
+// 单文件密钥。keyPath 参数仅为保持 main.go 调用签名不变而保留。
 func InitKeys(keyPath string) {
-	data, err := os.ReadFile(keyPath)
-	if err == nil {
-		block, _ := pem.Decode(data)
-		if block != nil {
-			parsedKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-			if err == nil {
-				privateKey = parsedKey
-				publicKey = &privateKey.PublicKey
-				kid = computeKID(publicKey)
-				log.Printf("[OIDC] 密钥对已从文件加载 (kid: %s)", kid)
-				return
-			}
-		}
-	}
-
-	log.Printf("[OIDC] 正在生成新的 RSA-2048 密钥对...")
-	privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Fatalf("[OIDC] RSA 密钥生成失败: %v", err)
-	}
-	publicKey = &privateKey.PublicKey
-	kid = computeKID(publicKey)
-
-	pemData := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	})
-	if err := os.WriteFile(keyPath, pemData, 0600); err != nil {
-		log.Fatalf("[OIDC] 密钥文件写入失败: %v", err)
-	}
-	log.Printf("[OIDC] RSA-2048 密钥对已生成并持久化 (kid: %s)", kid)
+	log.Printf("[OIDC] 多 Issuer 模式：签名密钥按应用（issuer_slug）独立管理，全局密钥文件已停用")
 }
 
 func computeKID(pub *rsa.PublicKey) string {
@@ -75,19 +38,111 @@ func computeKID(pub *rsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(hash[:8])
 }
 
-// RegisterRoutes registers all OIDC endpoints.
+// tenantMux 承载所有 /{slug}/... 追加式租户端点。它必须与主 mux 分开：
+// Go 1.22 ServeMux 认为两段通配（如 /{slug}/authorize）与子树前缀
+// （如 /static/）互不更具体而拒绝共存并 panic。分开注册 + Wrap 里按首段
+// 分流，既保留 https://host/{slug} 的 Issuer 形态，又规避该冲突。
+var tenantMux = func() *http.ServeMux {
+	m := http.NewServeMux()
+	m.HandleFunc("GET /{slug}/.well-known/openid-configuration", handleDiscovery)
+	m.HandleFunc("GET /{slug}/.well-known/jwks.json", handleJWKS)
+	m.HandleFunc("GET /{slug}/authorize", handleAuthorize)
+	m.HandleFunc("POST /{slug}/token", handleToken)
+	m.HandleFunc("GET /{slug}/userinfo", handleUserinfo)
+	return m
+}()
+
+// reservedFirstSegments 是主 mux 上已注册的固定首段：Wrap 遇到这些首段的
+// 请求一律交主 mux 处理，其余（视为 issuer_slug）交 tenantMux。
+var reservedFirstSegments = map[string]bool{
+	"":            true, // 根路径 "/"
+	"static":      true,
+	"login":       true,
+	"admin":       true,
+	"demo":        true,
+	"api":         true,
+	"ws":          true,
+	".well-known": true,
+	"favicon.ico": true,
+}
+
+// RegisterRoutes 在主 mux 上注册与 issuer 无关的固定端点：RFC 8414 插入式
+// 发现路径（固定 /.well-known 前缀，不与 /static/ 冲突）、根发现指引、以及
+// 会话相关的 SSE/callback。/{slug}/... 追加式端点由 tenantMux 承载，经 Wrap
+// 分流，不在此注册。
 func RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /.well-known/openid-configuration", handleDiscovery)
-	mux.HandleFunc("GET /.well-known/jwks.json", handleJWKS)
-	mux.HandleFunc("GET /authorize", handleAuthorize)
-	mux.HandleFunc("POST /token", handleToken)
-	mux.HandleFunc("GET /userinfo", handleUserinfo)
+	// RFC 8414 插入式发现路径（部分客户端库把 .well-known 插到 issuer 路径
+	// 之前），与追加式内容一致，最大化兼容。固定前缀，不触发通配冲突。
+	mux.HandleFunc("GET /.well-known/openid-configuration/{slug}", handleDiscovery)
+	mux.HandleFunc("GET /.well-known/jwks.json/{slug}", handleJWKS)
+
+	// 根发现端点：多 Issuer 下不存在“全局 issuer”，返回明确指引而非 404，
+	// 方便存量接入方自助排障。
+	mux.HandleFunc("GET /.well-known/openid-configuration", handleRootDiscoveryGone)
+
+	// 会话相关端点（与 issuer 无关，登录页/SSE 共用）。
 	mux.HandleFunc("GET /api/session/stream", handleSSE)
 	mux.HandleFunc("GET /api/session/callback", handleSessionCallback)
 }
 
+// Wrap 把主 mux 包成最终 http.Handler：请求首段命中固定路由 → 主 mux；
+// 否则视为 issuer_slug → tenantMux。这样 /{slug}/... 租户端点与 /static/
+// 等子树前缀就不必在同一个 mux 里共存。
+func Wrap(main http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first := firstSegment(r.URL.Path)
+		if reservedFirstSegments[first] {
+			main.ServeHTTP(w, r)
+			return
+		}
+		tenantMux.ServeHTTP(w, r)
+	})
+}
+
+// firstSegment 取路径的第一段（去掉前导 /），"/acme/authorize" -> "acme"，
+// "/" -> ""。
+func firstSegment(path string) string {
+	path = strings.TrimPrefix(path, "/")
+	if i := strings.IndexByte(path, '/'); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// resolveTenant 从请求路径通配段解析 issuer_slug 并反查 client_id。
+// 失败时直接写 404 响应并返回 ok=false，调用方据此提前返回。
+func resolveTenant(w http.ResponseWriter, r *http.Request) (slug, clientID string, ok bool) {
+	slug = r.PathValue("slug")
+	if slug == "" {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	clientID, found := database.ClientIDForSlug(slug)
+	if !found {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	return slug, clientID, true
+}
+
+// tenantIssuer 构造租户 Issuer：scheme://host/{slug}。
+func tenantIssuer(r *http.Request, slug string) string {
+	return getBaseURL(r) + "/" + slug
+}
+
+func handleRootDiscoveryGone(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error":             "multi_tenant",
+		"error_description": "本服务已启用多 Issuer：每个应用有独立的发现地址，请使用 " + getBaseURL(r) + "/{应用的 issuer_slug}/.well-known/openid-configuration",
+	})
+}
+
 func handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	issuer := getIssuer(r)
+	slug, _, ok := resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	issuer := tenantIssuer(r, slug)
 	config := map[string]interface{}{
 		"issuer":                                issuer,
 		"authorization_endpoint":                issuer + "/authorize",
@@ -109,27 +164,49 @@ func handleDiscovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleJWKS(w http.ResponseWriter, r *http.Request) {
-	if publicKey == nil {
-		http.Error(w, "Keys not initialized", http.StatusInternalServerError)
+	slug, _, ok := resolveTenant(w, r)
+	if !ok {
 		return
 	}
 
-	jwks := map[string]interface{}{
-		"keys": []map[string]interface{}{
-			{
-				"kty": "RSA",
-				"use": "sig",
-				"alg": "RS256",
-				"kid": kid,
-				"n":   base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes()),
-				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(publicKey.E)).Bytes()),
-			},
-		},
+	entries, err := tenantJWKSEntries(slug)
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, http.StatusOK, jwks)
+	// 尚未生成过密钥（例如刚回填 slug 还未签发过 token）：惰性生成一把，
+	// 保证 JWKS 端点始终返回可用公钥，下游可提前拉取。
+	if len(entries) == 0 {
+		if _, _, err := TenantSigningKey(slug); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if entries, err = tenantJWKSEntries(slug); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	keys := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		keys = append(keys, map[string]interface{}{
+			"kty": "RSA",
+			"use": "sig",
+			"alg": "RS256",
+			"kid": e.kid,
+			"n":   base64.RawURLEncoding.EncodeToString(e.pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(e.pub.E)).Bytes()),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"keys": keys})
 }
 
 func handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	_, tenantClientID, ok := resolveTenant(w, r)
+	if !ok {
+		return
+	}
+
 	responseType := r.URL.Query().Get("response_type")
 	clientID := r.URL.Query().Get("client_id")
 	redirectURI := r.URL.Query().Get("redirect_uri")
@@ -143,6 +220,12 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientID == "" || redirectURI == "" {
 		http.Error(w, "invalid_request: 缺少必需参数 client_id 或 redirect_uri", http.StatusBadRequest)
+		return
+	}
+	// client_id 必须与该 issuer_slug 绑定的应用一致：防止用 A 应用的 slug
+	// 端点为 B 应用发起授权，从而绕过租户隔离。
+	if clientID != tenantClientID {
+		http.Error(w, "unauthorized_client: client_id 与该 Issuer 不匹配", http.StatusForbidden)
 		return
 	}
 	if !strings.Contains(scope, "openid") {
@@ -171,6 +254,11 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleToken(w http.ResponseWriter, r *http.Request) {
+	slug, tenantClientID, ok := resolveTenant(w, r)
+	if !ok {
+		return
+	}
+
 	if err := r.ParseForm(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
@@ -195,14 +283,20 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sess, ok := session.DefaultManager.ExchangeCode(code)
-	if !ok {
+	sess, exchanged := session.DefaultManager.ExchangeCode(code)
+	if !exchanged {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
 
 	if sess.ClientID != clientID {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client"})
+		return
+	}
+	// 授权码必须在其所属应用的 Issuer 端点兑换：授权码是在 /{slug}/authorize
+	// 为该应用签发的，只能回到同一个 slug 的 /token 端点兑换。
+	if sess.ClientID != tenantClientID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
 
@@ -232,7 +326,14 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	issuer := getIssuer(r)
+	signKey, signKid, err := TenantSigningKey(slug)
+	if err != nil {
+		log.Printf("[OIDC] 加载租户 %s 签名密钥失败: %v", slug, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+
+	issuer := tenantIssuer(r, slug)
 	now := time.Now()
 
 	profile := identity.ProfileFor(identity.Identity{Provider: sess.Provider, UserID: sess.UserID})
@@ -252,8 +353,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwtLib.NewWithClaims(jwtLib.SigningMethodRS256, claims)
-	token.Header["kid"] = kid
-	idTokenStr, err := token.SignedString(privateKey)
+	token.Header["kid"] = signKid
+	idTokenStr, err := token.SignedString(signKey)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
@@ -269,6 +370,11 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUserinfo(w http.ResponseWriter, r *http.Request) {
+	slug, _, ok := resolveTenant(w, r)
+	if !ok {
+		return
+	}
+
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		w.Header().Set("WWW-Authenticate", "Bearer")
@@ -277,11 +383,22 @@ func handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
+	// 按 token 头里的 kid 到「本租户」的密钥集合（在用 + 宽限期内退休）里
+	// 取公钥验签；跨租户令牌的 kid 在此查不到，签名验证直接失败 —— 这是
+	// 租户隔离的第一道闸。
 	token, err := jwtLib.Parse(tokenStr, func(t *jwtLib.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwtLib.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return publicKey, nil
+		kidVal, _ := t.Header["kid"].(string)
+		if kidVal == "" {
+			return nil, fmt.Errorf("missing kid")
+		}
+		pub, found := tenantPublicKeyByKid(slug, kidVal)
+		if !found {
+			return nil, fmt.Errorf("unknown kid for tenant")
+		}
+		return pub, nil
 	})
 
 	if err != nil || !token.Valid {
@@ -293,6 +410,15 @@ func handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	claims, ok := token.Claims.(jwtLib.MapClaims)
 	if !ok {
 		http.Error(w, "Invalid Claims", http.StatusUnauthorized)
+		return
+	}
+
+	// 第二道闸：iss 必须等于本 slug 的 Issuer，杜绝签名恰好匹配但来源租户
+	// 不符的边界情况。
+	expectedIss := tenantIssuer(r, slug)
+	if iss, _ := claims["iss"].(string); iss != expectedIss {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		http.Error(w, "Invalid Token", http.StatusUnauthorized)
 		return
 	}
 
@@ -393,7 +519,9 @@ func validateClientSecret(clientID, secret string) bool {
 	return checkPasswordHash(secret, storedHash)
 }
 
-func getIssuer(r *http.Request) string {
+// getBaseURL 返回 scheme://host（不含路径），供拼接租户 Issuer 使用；
+// 尊重反代下发的 X-Forwarded-Proto。
+func getBaseURL(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"

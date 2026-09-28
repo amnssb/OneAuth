@@ -32,13 +32,13 @@ OneAuth 将传统繁琐的 OAuth 授权流程转换为安全直观的“群内�
 +-----------------------------------------------------------------------------------------+
 |                                    OneAuth 进程空间                                     |
 |                                                                                         |
-|  [ OIDC 协议端点 ]                                                                       |
-|  - GET  /.well-known/openid-configuration                                               |
-|  - GET  /.well-known/jwks.json                                                          |
-|  - GET  /authorize ──> (校验 client_id/redirect_uri) ──> 创建会话 ──> 重定向 /login       |
+|  [ OIDC 协议端点 (多 Issuer：每应用独立 {slug} 前缀与签名密钥) ]                          |
+|  - GET  /{slug}/.well-known/openid-configuration                                        |
+|  - GET  /{slug}/.well-known/jwks.json                                                   |
+|  - GET  /{slug}/authorize ──> (校验 client_id/redirect_uri) ──> 创建会话 ──> 重定向 /login |
 |  - GET  /api/session/stream ──> 建立 SSE 长连接实时监听核销状态                         |
-|  - POST /token ──> 校验 AuthCode/PKCE ──> 签发 RS256 JWT ID Token                       |
-|  - GET  /userinfo ──> 解析 Bearer JWT ──> 响应用户资料                                  |
+|  - POST /{slug}/token ──> 校验 AuthCode/PKCE ──> 用该应用密钥签发 RS256 JWT ID Token     |
+|  - GET  /{slug}/userinfo ──> 按 kid+iss 校验 Bearer JWT ──> 响应用户资料                 |
 |                                                                                         |
 |  [ OneBot 微内核 ]                                                                      |
 |  - WS   /ws/onebot ──> 接收 NapCatQQ 反向 WS 消息 ──> 过滤群号 ──> 提取 6 位验证码      |
@@ -86,21 +86,26 @@ sequenceDiagram
 
 ### 2.1 核心 OIDC 端点
 
+> **多 Issuer（多租户）**：每个 OIDC 应用拥有独立 Issuer `https://<host>/{slug}`，协议端点全部挂在该 slug 前缀下、由各自独立的 RSA 密钥签发。`{slug}` 即在管理后台创建应用时填写的「Issuer 标识」。
+
 | 请求方法 | 路径 | 功能说明 | 认证要求 |
 |---|---|---|---|
-| `GET` | `/.well-known/openid-configuration` | OpenID Connect 自动发现元数据文档 | 公开 |
-| `GET` | `/.well-known/jwks.json` | RS256 签名公钥 JWKS 集合 | 公开 |
-| `GET` | `/authorize` | OAuth2 授权端点（支持 PKCE S256） | 公开 |
-| `POST` | `/token` | 授权码换取令牌端点 | HTTP Basic 或 POST Form (`client_secret` 或 `code_verifier`) |
-| `GET` | `/userinfo` | 获取用户资料端点 | `Authorization: Bearer <access_token>` |
+| `GET` | `/{slug}/.well-known/openid-configuration` | 该应用的 OpenID Connect 自动发现文档（追加式） | 公开 |
+| `GET` | `/.well-known/openid-configuration/{slug}` | 同上（RFC 8414 插入式，兼容部分客户端库） | 公开 |
+| `GET` | `/{slug}/.well-known/jwks.json` | 该应用的 RS256 签名公钥 JWKS 集合 | 公开 |
+| `GET` | `/{slug}/authorize` | OAuth2 授权端点（支持 PKCE S256） | 公开 |
+| `POST` | `/{slug}/token` | 授权码换取令牌端点 | HTTP Basic 或 POST Form (`client_secret` 或 `code_verifier`) |
+| `GET` | `/{slug}/userinfo` | 获取用户资料端点（按 kid+iss 校验，跨租户令牌被拒） | `Authorization: Bearer <access_token>` |
 | `GET` | `/login` | 用户前台验证码核销页面 | 携带 `session_id` |
 | `GET` | `/api/session/stream` | Server-Sent Events (SSE) 状态推送流 | 携带 `session_id` |
 | `WS` | `/ws/onebot` | OneBot v11/v12 反向 WebSocket 接收端点 | 可选 URL Query `?access_token=` 鉴权 |
 
+> ⚠️ **破坏性变更**：旧版本的根路径端点（`/.well-known/openid-configuration`、`/authorize`、`/token`、`/userinfo`、`/.well-known/jwks.json`）已退役。升级后所有存量应用会在启动时被自动分配 `issuer_slug`（默认取 client_id 规整值，结果打印在启动日志），接入方需把发现地址改为 `https://<host>/{slug}/.well-known/openid-configuration`。管理后台「应用管理」列表可查看每个应用的 Issuer URL 与签名密钥 kid，并支持一键轮换密钥（旧密钥保留 7 天宽限期）。
+
 ### 2.2 JWT Claims 规范 (ID Token)
 ```json
 {
-  "iss": "https://auth.example.com",
+  "iss": "https://auth.example.com/gitea",
   "sub": "123456789",
   "aud": "client_abc123",
   "exp": 1758999999,
@@ -126,7 +131,7 @@ OneAuth 采用零依赖设计，静态打包，无需安装任何系统运行库
 |---|---|---|
 | `PORT` | `9000` | 监听端口 |
 | `DB_PATH` | `oneauth.db` | SQLite 数据库文件落盘路径 |
-| `KEY_PATH` | `oneauth_rsa.pem` | RSA 2048 签名私钥路径（首次启动自动创建） |
+| `KEY_PATH` | `oneauth_rsa.pem` | ⚠️ 已弃用：多 Issuer 模式下签名密钥按应用（issuer_slug）独立存于 SQLite，此变量保留仅为向后兼容，不再使用 |
 
 #### Windows 启动
 双击 `oneauth.exe` 或在终端执行：
@@ -421,7 +426,7 @@ auth.yourdomain.com {
    - **OAuth2 提供商**: `OpenID Connect 1.0`
    - **客户端 ID**: 填写在 OneAuth 中注册的 Client ID
    - **客户端密钥**: 填写注册时生成的 Client Secret
-   - **OpenID Connect 自动发现 URL**: `https://auth.yourdomain.com/.well-known/openid-configuration`
+   - **OpenID Connect 自动发现 URL**: `https://auth.yourdomain.com/{issuer_slug}/.well-known/openid-configuration`（`{issuer_slug}` 为在 OneAuth 创建该应用时填写的 Issuer 标识）
    - **附加 Scopes**: `openid profile email`
 3. 保存并测试登录。
 
@@ -431,11 +436,12 @@ auth.yourdomain.com {
 1. 在 Nextcloud 应用中心启用 **Social Login** 插件。
 2. 进入 **管理设置** → **Social login** → **Custom OIDC** 添加：
    - **Title**: `QQ 统一认证`
-   - **Authorize URL**: `https://auth.yourdomain.com/authorize`
-   - **Token URL**: `https://auth.yourdomain.com/token`
-   - **User Info URL**: `https://auth.yourdomain.com/userinfo`
+   - **Authorize URL**: `https://auth.yourdomain.com/{issuer_slug}/authorize`
+   - **Token URL**: `https://auth.yourdomain.com/{issuer_slug}/token`
+   - **User Info URL**: `https://auth.yourdomain.com/{issuer_slug}/userinfo`
    - **Client ID & Secret**: 填写 OneAuth 客户端信息
    - **Scope**: `openid profile email`
+   - `{issuer_slug}` 为在 OneAuth 创建该应用时填写的 Issuer 标识
 
 ---
 
@@ -448,9 +454,10 @@ name = OneAuth
 client_id = YOUR_CLIENT_ID
 client_secret = YOUR_CLIENT_SECRET
 scopes = openid profile email
-auth_url = https://auth.yourdomain.com/authorize
-token_url = https://auth.yourdomain.com/token
-api_url = https://auth.yourdomain.com/userinfo
+; 将 {issuer_slug} 替换为在 OneAuth 创建该应用时填写的 Issuer 标识
+auth_url = https://auth.yourdomain.com/{issuer_slug}/authorize
+token_url = https://auth.yourdomain.com/{issuer_slug}/token
+api_url = https://auth.yourdomain.com/{issuer_slug}/userinfo
 auto_login = false
 ```
 

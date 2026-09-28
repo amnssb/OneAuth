@@ -799,6 +799,13 @@
                     <button class="copy-btn" onclick="copyText('secretClientSecret', this)">复制</button>
                 </div>
             </div>
+            <div>
+                <span class="credential-label">Issuer (发现地址前缀)</span>
+                <div class="credential-row">
+                    <span class="credential-value" id="secretIssuer"></span>
+                    <button class="copy-btn" onclick="copyText('secretIssuer', this)">复制</button>
+                </div>
+            </div>
             <div class="modal-actions">
                 <button class="btn btn-primary" onclick="closeSecretModal()">我已保存</button>
             </div>
@@ -810,6 +817,13 @@
         <div class="modal-box" style="max-width:560px; max-height:90vh; overflow-y:auto;">
             <h3>编辑应用</h3>
             <p class="modal-desc">品牌覆盖仅影响该项目发起登录时的登录页 —— 多项目接入时各项目可拥有自己的页面；留空表示继承全局设置。</p>
+            <div class="form-group">
+                <label>Issuer 标识 (slug) <span class="label-hint">创建后不可修改</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🏷️</span>
+                    <input id="editIssuerSlug" type="text" disabled>
+                </div>
+            </div>
             <div class="form-group">
                 <label>应用名称</label>
                 <div class="input-wrapper">
@@ -1132,6 +1146,14 @@
                                 <span class="input-icon">📦</span>
                                 <input id="newClientName" type="text" placeholder="例如: Gitea 团队仓库">
                             </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Issuer 标识 (slug) <span class="label-hint">创建后不可修改，决定该应用独立 Issuer</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🏷️</span>
+                                <input id="newIssuerSlug" type="text" placeholder="例如: gitea" oninput="updateIssuerPreview()">
+                            </div>
+                            <div class="label-hint" id="issuerPreview" style="margin-top:6px; word-break:break-all;">Issuer: —</div>
                         </div>
                         <div class="form-group">
                             <label>授权回调地址 (Redirect URIs) <span class="label-hint">多个地址用英文逗号分隔</span></label>
@@ -1512,17 +1534,22 @@
             clientMap = {};
             list.forEach(c => {
                 clientMap[c.client_id] = c;
+                const issuerURL = c.issuer_slug ? (location.origin + '/' + c.issuer_slug) : '(未分配)';
+                const kidText = c.kid ? ('kid: ' + c.kid) : 'kid: 待生成';
                 html += '<div class="client-item">' +
                     '<div class="client-meta">' +
                         '<div class="client-icon-avatar">🔑</div>' +
                         '<div class="client-name-id">' +
                             '<div class="client-name">' + escapeHtml(c.client_name || '未命名应用') + '</div>' +
                             '<div class="client-id">' + escapeHtml(c.client_id || '') + '</div>' +
+                            '<div class="client-id" title="Issuer">🌐 ' + escapeHtml(issuerURL) + '</div>' +
+                            '<div class="client-id" title="签名密钥">🔏 ' + escapeHtml(kidText) + '</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="client-uris-badge" title="' + escapeHtml(c.redirect_uris || '') + '">回调: ' + escapeHtml(c.redirect_uris || '') + '</div>' +
                     '<div style="display:flex; gap:8px; flex-shrink:0;">' +
                         '<button class="btn btn-secondary" data-edit-id="' + escapeHtml(c.client_id) + '" style="padding:6px 14px; font-size:0.8rem;">✏️ 编辑</button>' +
+                        '<button class="btn btn-secondary" data-rotate-id="' + escapeHtml(c.client_id) + '" style="padding:6px 14px; font-size:0.8rem;">🔄 轮换密钥</button>' +
                         '<button class="btn btn-danger" data-client-id="' + escapeHtml(c.client_id) + '">🗑️ 移除</button>' +
                     '</div>' +
                 '</div>';
@@ -1535,6 +1562,9 @@
             listEl.querySelectorAll('.btn-secondary[data-edit-id]').forEach(btn => {
                 btn.addEventListener('click', () => openEditModal(btn.dataset.editId));
             });
+            listEl.querySelectorAll('.btn-secondary[data-rotate-id]').forEach(btn => {
+                btn.addEventListener('click', () => rotateClientKey(btn.dataset.rotateId));
+            });
             $('clientCountPill').innerText = list.length;
             $('statClientCount').innerText = list.length;
         } catch (e) {
@@ -1542,22 +1572,46 @@
         }
     }
 
+    // Issuer 预览：把当前访问的 origin 与用户填写的 slug 拼成完整 Issuer URL，
+    // 让管理员直观看到该应用最终的发现地址。
+    function updateIssuerPreview() {
+        const slug = $('newIssuerSlug').value.trim().toLowerCase();
+        $('issuerPreview').textContent = 'Issuer: ' + (slug ? location.origin + '/' + slug : '—');
+    }
+
     async function createClient() {
         const name = $('newClientName').value.trim();
         const uris = $('newRedirectURIs').value.trim();
+        const slug = $('newIssuerSlug').value.trim().toLowerCase();
         if (!name || !uris) throw new Error('请填写应用名称和回调地址');
+        if (!slug) throw new Error('请填写 Issuer 标识 (slug)');
 
         const data = await apiFetch('/api/admin/clients', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ client_name: name, redirect_uris: uris })
+            body: JSON.stringify({ client_name: name, redirect_uris: uris, issuer_slug: slug })
         });
         $('newClientName').value = '';
         $('newRedirectURIs').value = '';
+        $('newIssuerSlug').value = '';
+        updateIssuerPreview();
         $('secretClientId').textContent = data.client_id || '';
         $('secretClientSecret').textContent = data.client_secret || '';
+        $('secretIssuer').textContent = data.issuer_slug ? (location.origin + '/' + data.issuer_slug) : '';
         $('secretModal').classList.remove('hidden');
         await loadClients();
+    }
+
+    async function rotateClientKey(id) {
+        confirmAction('轮换签名密钥', '轮换后新令牌立即使用新密钥签名，旧密钥保留 7 天宽限期（仍留在 JWKS 中），宽限期内已签发的旧令牌仍可验证。确定轮换吗？', async () => {
+            try {
+                const data = await apiFetch('/api/admin/clients/' + encodeURIComponent(id) + '/rotate-key', { method: 'POST' });
+                await loadClients();
+                showToast('密钥已轮换，新 kid: ' + (data.kid || ''), 'success');
+            } catch (e) {
+                showToast(e.message, 'error');
+            }
+        });
     }
 
     function closeSecretModal() {
@@ -1606,6 +1660,7 @@
         const c = clientMap[id];
         if (!c) return;
         editClientId = id;
+        $('editIssuerSlug').value = c.issuer_slug || '';
         $('editClientName').value = c.client_name || '';
         $('editRedirectURIs').value = c.redirect_uris || '';
         $('editDisplayName').value = c.display_name || '';

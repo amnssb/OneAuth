@@ -127,6 +127,10 @@ func main() {
 	// 预置或确保 Demo 测试应用存在（是否对外可访问由 demo_enabled 开关控制）
 	initDemoClient()
 
+	// 多 Issuer 强制迁移：打印各应用当前的 issuer_slug 与发现地址，提醒
+	// 接入方把配置改到 https://<host>/{slug}/.well-known/openid-configuration。
+	logTenantIssuers(port)
+
 	// 根路径：始终展示 OneAuth 首页，不再依赖 Demo 是否启用
 	mux.HandleFunc("GET /{$}", handleHomePage)
 
@@ -137,14 +141,14 @@ func main() {
 
 	log.Printf("🚀 OneAuth 已启动 → http://0.0.0.0:%s\n", port)
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
-	log.Printf("🔗 OIDC 发现 → http://localhost:%s/.well-known/openid-configuration\n", port)
+	log.Printf("🔗 OIDC 发现（多 Issuer）→ http://localhost:%s/{issuer_slug}/.well-known/openid-configuration\n", port)
 	log.Printf("🤖 OneBot WS → ws://localhost:%s/ws/onebot\n", port)
 
 	// 显式配置 Server：ReadHeaderTimeout 防 Slowloris 慢连接占用；
 	// 不设 WriteTimeout（会掐断 SSE 长连接），空闲回收交给 IdleTimeout。
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           oidc.Wrap(mux), // 首段非固定路由的请求分流到租户端点
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       75 * time.Second,
 		MaxHeaderBytes:    1 << 20,
@@ -191,6 +195,7 @@ func getEnv(key, defaultVal string) string {
 const (
 	demoClientID     = "oneauth_demo_app"
 	demoClientSecret = "demo_secret_888888"
+	demoIssuerSlug   = "demo-app"
 )
 
 // demoGuard 用 demo_enabled 系统设置包裹 demo 相关 handler：关闭时统一
@@ -314,14 +319,45 @@ func handleHomePage(w http.ResponseWriter, r *http.Request) {
 func initDemoClient() {
 	h := sha256.Sum256([]byte(demoClientSecret))
 	secretHash := base64.RawURLEncoding.EncodeToString(h[:])
+	// 多 Issuer 强制迁移后 demo 应用也必须有独立 slug，固定为 demo-app；
+	// 冲突处理交给 issuer_slug 唯一索引（demo-app 是保留给内置应用的固定值）。
 	_, _ = database.WriteDB.Exec(`
-		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris)
-		VALUES (?, ?, 'OneAuth 内置体验应用', 'http://localhost:9000/demo/callback,http://127.0.0.1:9000/demo/callback')
-		ON CONFLICT(client_id) DO UPDATE SET redirect_uris = excluded.redirect_uris
-	`, demoClientID, secretHash)
+		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug)
+		VALUES (?, ?, 'OneAuth 内置体验应用', 'http://localhost:9000/demo/callback,http://127.0.0.1:9000/demo/callback', ?)
+		ON CONFLICT(client_id) DO UPDATE SET redirect_uris = excluded.redirect_uris, issuer_slug = excluded.issuer_slug
+	`, demoClientID, secretHash, demoIssuerSlug)
 }
 
-// currentScheme 与 getIssuer 同规则：反代告知 https 或原生 TLS 时用 https。
+// logTenantIssuers 在启动时打印每个已注册应用的 issuer_slug 与本地发现
+// 地址，作为多 Issuer 强制迁移的破坏性变更提示：接入方需据此更新配置。
+func logTenantIssuers(port string) {
+	rows, err := database.DB.Query("SELECT client_name, COALESCE(issuer_slug, '') FROM oidc_clients ORDER BY created_at")
+	if err != nil {
+		log.Printf("[启动] 读取应用 Issuer 列表失败: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	log.Printf("🏷️  多 Issuer 已启用，各应用发现地址如下（接入方请更新配置）：")
+	any := false
+	for rows.Next() {
+		var name, slug string
+		if err := rows.Scan(&name, &slug); err != nil {
+			continue
+		}
+		any = true
+		if slug == "" {
+			log.Printf("   - %s：⚠️ 未分配 issuer_slug（异常，请在后台补齐）", name)
+			continue
+		}
+		log.Printf("   - %s → http://localhost:%s/%s/.well-known/openid-configuration", name, port, slug)
+	}
+	if !any {
+		log.Printf("   （暂无注册应用）")
+	}
+}
+
+// currentScheme 与 getBaseURL 同规则：反代告知 https 或原生 TLS 时用 https。
 func currentScheme(r *http.Request) string {
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		return "https"
@@ -357,7 +393,7 @@ func registerDemoRedirectURI(callback string) {
 func handleDemoPage(w http.ResponseWriter, r *http.Request) {
 	callback := fmt.Sprintf("%s://%s/demo/callback", currentScheme(r), r.Host)
 	registerDemoRedirectURI(callback)
-	authorizeURL := "/authorize?client_id=" + demoClientID +
+	authorizeURL := "/" + demoIssuerSlug + "/authorize?client_id=" + demoClientID +
 		"&redirect_uri=" + url.QueryEscape(callback) +
 		"&response_type=code&scope=openid+profile+email"
 
@@ -492,7 +528,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "localhost:9000"
 	}
-	tokenURL := fmt.Sprintf("%s://%s/token", currentScheme(r), host)
+	tokenURL := fmt.Sprintf("%s://%s/%s/token", currentScheme(r), host, demoIssuerSlug)
 
 	resp, err := callbackClient.PostForm(tokenURL, tokenForm)
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"oneauth/internal/database"
+	"oneauth/internal/oidc"
 	"oneauth/internal/onebot"
 	"oneauth/internal/session"
 )
@@ -328,6 +329,7 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/clients", SecureHeaders(authMiddleware(handleCreateClient)))
 	mux.HandleFunc("PUT /api/admin/clients/{id}", SecureHeaders(authMiddleware(handleUpdateClient)))
 	mux.HandleFunc("DELETE /api/admin/clients/{id}", SecureHeaders(authMiddleware(handleDeleteClient)))
+	mux.HandleFunc("POST /api/admin/clients/{id}/rotate-key", SecureHeaders(authMiddleware(handleRotateClientKey)))
 	mux.HandleFunc("GET /api/admin/setup", SecureHeaders(handleSetupStatus))
 	mux.HandleFunc("POST /api/admin/setup", SecureHeaders(handleInitialSetup))
 	mux.HandleFunc("POST /api/admin/preview-login", SecureHeaders(authMiddleware(handlePreviewLogin)))
@@ -704,7 +706,8 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 // ---- OIDC 客户端管理 ----
 
 // ClientInfo 的品牌字段为可选项：空串表示继承全局设置，登录页按接入的
-// 项目自动呈现各自外观。
+// 项目自动呈现各自外观。IssuerSlug 是该应用独立 Issuer 的路径标识，
+// Kid 是其当前在用签名密钥的 kid（供后台展示与轮换）。
 type ClientInfo struct {
 	ClientID      string `json:"client_id"`
 	ClientName    string `json:"client_name"`
@@ -714,6 +717,8 @@ type ClientInfo struct {
 	BackgroundURL string `json:"background_url"`
 	PromptText    string `json:"prompt_text"`
 	CustomCSS     string `json:"custom_css"`
+	IssuerSlug    string `json:"issuer_slug"`
+	Kid           string `json:"kid"`
 }
 
 type clientRequest struct {
@@ -723,6 +728,8 @@ type clientRequest struct {
 	BackgroundURL string `json:"background_url"`
 	PromptText    string `json:"prompt_text"`
 	CustomCSS     string `json:"custom_css"`
+	// IssuerSlug 仅在创建时使用（创建后不可变），编辑请求会忽略此字段。
+	IssuerSlug string `json:"issuer_slug"`
 }
 
 // validateClientRequest 校验并规范一个客户端创建/编辑请求；品牌字段复用
@@ -759,18 +766,9 @@ func validateClientRequest(req *clientRequest) error {
 	return nil
 }
 
-func clientInfoFromRow(scan func(*string, *string, *string, *string, *string, *string, *string, *string)) ClientInfo {
-	var id, name, uris, created, dn, bg, pt, css string
-	scan(&id, &name, &uris, &created, &dn, &bg, &pt, &css)
-	return ClientInfo{
-		ClientID: id, ClientName: name, RedirectURIs: uris, CreatedAt: created,
-		DisplayName: dn, BackgroundURL: bg, PromptText: pt, CustomCSS: css,
-	}
-}
-
 const clientColumns = `client_id, client_name, redirect_uris, created_at,
 	COALESCE(display_name, ''), COALESCE(background_url, ''),
-	COALESCE(prompt_text, ''), COALESCE(custom_css, '')`
+	COALESCE(prompt_text, ''), COALESCE(custom_css, ''), COALESCE(issuer_slug, '')`
 
 func handleListClients(w http.ResponseWriter, r *http.Request) {
 	rows, err := database.DB.Query("SELECT " + clientColumns + " FROM oidc_clients ORDER BY created_at")
@@ -784,8 +782,15 @@ func handleListClients(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c ClientInfo
 		if err := rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.CreatedAt,
-			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS); err != nil {
+			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS, &c.IssuerSlug); err != nil {
 			continue
+		}
+		// 附带当前在用签名密钥的 kid，供后台展示；没有则留空（应用刚建、
+		// 尚未签发过 token 时会惰性生成）。
+		if c.IssuerSlug != "" {
+			if key, ok := database.ActiveTenantKey(c.IssuerSlug); ok {
+				c.Kid = key.Kid
+			}
 		}
 		clients = append(clients, c)
 	}
@@ -836,6 +841,25 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// issuer_slug 必填且创建后不可变：它决定该应用的 Issuer
+	// (https://host/{slug})，改动会让下游配置失效。
+	slug := strings.ToLower(strings.TrimSpace(req.IssuerSlug))
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "Issuer 标识 (issuer_slug) 不能为空")
+		return
+	}
+	if err := database.ValidateSlug(slug); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if taken, err := database.SlugTaken(slug); err != nil {
+		writeError(w, http.StatusInternalServerError, "Internal error")
+		return
+	} else if taken {
+		writeError(w, http.StatusBadRequest, "Issuer 标识已被占用，请换一个: "+slug)
+		return
+	}
+
 	clientID := generateClientID()
 	clientSecret := generateClientSecret()
 	if clientID == "" || clientSecret == "" {
@@ -848,21 +872,22 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 	_, err := database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris,
-			display_name, background_url, prompt_text, custom_css)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			display_name, background_url, prompt_text, custom_css, issuer_slug)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		clientID, secretHash, req.ClientName, req.RedirectURIs,
-		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS)
+		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, slug)
 	if err != nil {
 		log.Printf("[管理后台] 创建客户端失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "Internal error")
 		return
 	}
 
-	log.Printf("[管理后台] 创建 OIDC 客户端 %q (%s) ip=%s", req.ClientName, clientID, clientIP(r))
+	log.Printf("[管理后台] 创建 OIDC 客户端 %q (%s, issuer_slug=%s) ip=%s", req.ClientName, clientID, slug, clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"client_id":     clientID,
 		"client_secret": clientSecret,
 		"client_name":   req.ClientName,
+		"issuer_slug":   slug,
 	})
 }
 
@@ -923,6 +948,29 @@ func handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[管理后台] 删除 OIDC 客户端 %s ip=%s", id, clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleRotateClientKey 轮换某应用（issuer_slug）的签名密钥：旧密钥进入
+// 宽限期（仍出现在 JWKS 中），新密钥立即生效用于后续签发。返回新 kid。
+func handleRotateClientKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "Bad request")
+		return
+	}
+	slug, ok := database.SlugForClient(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "客户端不存在或未分配 Issuer 标识")
+		return
+	}
+	newKid, err := oidc.RotateTenantKey(slug)
+	if err != nil {
+		log.Printf("[管理后台] 轮换客户端 %s (slug=%s) 密钥失败: %v", id, slug, err)
+		writeError(w, http.StatusInternalServerError, "密钥轮换失败")
+		return
+	}
+	log.Printf("[管理后台] 轮换 OIDC 客户端 %s (slug=%s) 签名密钥，新 kid=%s ip=%s", id, slug, newKid, clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "kid": newKid})
 }
 
 // ---- 鉴权与工具 ----

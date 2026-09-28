@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"oneauth/internal/database"
 )
 
 func newTestLimiter(window time.Duration, max int, lock time.Duration) *loginLimiter {
@@ -309,6 +312,43 @@ func TestDecodeJSONLimitsBody(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/t", strings.NewReader(`not json`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed body: expected 400, got %d", rec.Code)
+	}
+}
+
+// 创建应用：issuer_slug 必填、格式校验、唯一性校验，成功返回 slug。
+func TestHandleCreateClientSlug(t *testing.T) {
+	if _, err := database.InitDB(filepath.Join(t.TempDir(), "admin.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/clients", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handleCreateClient(rec, req)
+		return rec
+	}
+
+	// 缺 slug -> 400
+	if rec := post(`{"client_name":"A","redirect_uris":"https://a.com/cb"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing slug must 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 保留字 slug -> 400
+	if rec := post(`{"client_name":"A","redirect_uris":"https://a.com/cb","issuer_slug":"admin"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved slug must 400, got %d", rec.Code)
+	}
+	// 合法创建 -> 200 且回显 slug
+	rec := post(`{"client_name":"A","redirect_uris":"https://a.com/cb","issuer_slug":"acme"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid create must 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"issuer_slug":"acme"`) {
+		t.Fatalf("response must echo issuer_slug, got %s", rec.Body.String())
+	}
+	// 重复 slug -> 400
+	if rec := post(`{"client_name":"B","redirect_uris":"https://b.com/cb","issuer_slug":"acme"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate slug must 400, got %d", rec.Code)
 	}
 }
 

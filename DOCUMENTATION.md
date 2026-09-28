@@ -49,7 +49,8 @@ OneAuth 旨在解决中小型私有 Web 应用（如 Gitea, Nextcloud, Grafana �
 |                                                                                         |
 |  [ 持久化层 (SQLite WAL) ]                                                              |
 |  - system_settings: 站点名、背景壁纸、自定义 CSS、目标群号、Bot 连接 Token、TTL          |
-|  - oidc_clients: client_id、client_secret_hash、回调地址白名单                          |
+|  - oidc_clients: client_id、client_secret_hash、回调地址白名单、issuer_slug             |
+|  - tenant_keys: 每个 issuer_slug 独立的 RSA 签名密钥历史（含轮换宽限期）                 |
 |  - admin_users: 管理员用户名与 bcrypt 密码哈希                                          |
 +-----------------------------------------------------------------------------------------+
 ```
@@ -124,7 +125,8 @@ oneauth/
   - `PRAGMA journal_mode = WAL;` (开启写前日志，高并发读写不互斥)
   - `PRAGMA busy_timeout = 5000;` (避免并发写冲突时直接报错)
   - `PRAGMA synchronous = NORMAL;` (兼顾性能与掉电安全性)
-  - 维护 `system_settings`、`oidc_clients`、`admin_users` 三张表。
+  - 维护 `system_settings`、`oidc_clients`、`tenant_keys`、`admin_users` 四张表。
+  - v3 迁移：为 `oidc_clients` 增加 `issuer_slug`（多 Issuer 路径标识，唯一索引），并为存量应用自动回填合法 slug。
 
 ### 3.2 `internal/session` (状态机层)
 - **职责**: 高频登录验证会话管理。
@@ -143,18 +145,22 @@ oneauth/
   - 使用正则 `^[2-9A-HJ-NP-Z]{6}$` 在微秒级完成普通闲聊与验证码的过滤。
 
 ### 3.4 `internal/oidc` (身份认证协议层)
-- **职责**: 标准 OIDC 端点提供与 RSA 密钥对生命周期管理。
+- **职责**: 多 Issuer OIDC 端点提供与按应用隔离的 RSA 密钥生命周期管理。
 - **关键设计**:
-  - 首次运行自动生成 2048 位 RSA 密钥并持久化为 PEM 格式文件。
-  - 公钥指纹生成唯一 `kid` 并提供 `/.well-known/jwks.json`。
-  - `/token` 支持 Authorization Code 模式及 PKCE S256 校验。
-  - 签发标准的 RS256 JWT，映射 QQ 号至 `sub`, `email` (`{qq}@qq.com`), `picture` 等 Claims。
+  - **多 Issuer**：每个应用有独立 Issuer `https://<host>/{slug}`，协议端点全部挂在 `/{slug}` 前缀下（`handler.go`）；发现文档同时提供追加式与 RFC 8414 插入式两种路径以兼容不同客户端库。
+  - **按应用密钥**（`keys.go`）：每个 `issuer_slug` 独立生成/持久化 RSA-2048 私钥到 `tenant_keys` 表，进程内缓存；支持密钥轮换（旧密钥进入 7 天宽限期，其间仍出现在该应用的 JWKS 中，之后物理清理）。
+  - 公钥指纹生成唯一 `kid`，`/{slug}/.well-known/jwks.json` 返回该应用在用 + 宽限期内的公钥集合。
+  - `/{slug}/token` 支持 Authorization Code 模式及 PKCE S256 校验，用该应用密钥签发。
+  - `/{slug}/userinfo` 按 token 的 `kid` 到本应用密钥集合验签，并强校验 `iss` 与路径一致 —— 跨租户令牌被双重拒绝。
+  - 签发标准 RS256 JWT，映射 QQ 号至 `sub`, `email` (`{qq}@qq.com`), `picture` 等 Claims。
 
 ### 3.5 `internal/admin` (运维管理层)
 - **职责**: 提供系统级参数配置与 OIDC 客户端管理能力。
 - **关键设计**:
   - 密码使用 `bcrypt` 单向散列加密。
   - 客户端密钥在创建时通过 SHA-256 散列入库，明文仅展示一次。
+  - 创建应用时必填 `issuer_slug`（格式校验 + 保留字黑名单 + 唯一性校验，创建后不可变）。
+  - 提供 `POST /api/admin/clients/{id}/rotate-key` 轮换该应用签名密钥；应用列表展示各应用 Issuer URL 与在用 kid。
   - 具备首次启动无账号时的引导注册逻辑 (`/api/admin/setup`)。
 
 ---
@@ -167,4 +173,4 @@ oneauth/
 3. **已支持环境配置**:
    - `PORT`: 监听端口（默认 `9000`）
    - `DB_PATH`: SQLite 数据库落盘路径（默认 `oneauth.db`）
-   - `KEY_PATH`: RSA 私钥存储路径（默认 `oneauth_rsa.pem`）
+   - `KEY_PATH`: ⚠️ 已弃用（多 Issuer 模式下签名密钥按应用存于 SQLite `tenant_keys`，此变量保留仅为兼容旧部署脚本）

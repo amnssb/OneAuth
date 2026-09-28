@@ -16,11 +16,14 @@ import (
 )
 
 const (
-	wsToken      = "2rZY778PKgCO6ljZ"
-	targetGroup  = 309623044
-	testQQ       = 100000001
-	clientID     = "oa_1M6NAtTrYITbvmul"
-	clientSecret = "iuH6nsEJQs93H0hEZUsAkWyLQsS0cW3A9fUU_Zn4Gp8="
+	wsToken     = "2rZY778PKgCO6ljZ"
+	targetGroup = 309623044
+	testQQ      = 100000001
+	// 默认打内置 demo 应用：它随服务启动固定存在，且带固定 issuer_slug，
+	// 让端到端冒烟无需先手动注册应用。可用环境变量覆盖成自建应用。
+	clientID     = "oneauth_demo_app"
+	clientSecret = "demo_secret_888888"
+	issuerSlug   = "demo-app"
 )
 
 // oneAuthHost 可用环境变量 ONEAUTH_HOST 覆盖（默认 localhost:9000），
@@ -40,8 +43,14 @@ func main() {
 
 	// 1. 发起 OIDC 授权请求，获取登录页与验证码
 	fmt.Println("\n[步骤 1] 模拟业务系统发起 /authorize 请求...")
-	authURL := fmt.Sprintf("http://%s/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=openid+profile+email",
-		oneAuthHost, clientID, url.QueryEscape("http://localhost:8080/callback"))
+	// 回调地址必须在应用的 redirect_uris 白名单内。内置 demo 应用预置了
+	// http://localhost:9000/demo/callback，作为冒烟默认值。
+	redirectURI := os.Getenv("ONEAUTH_REDIRECT_URI")
+	if redirectURI == "" {
+		redirectURI = "http://localhost:9000/demo/callback"
+	}
+	authURL := fmt.Sprintf("http://%s/%s/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=openid+profile+email",
+		oneAuthHost, issuerSlug, clientID, url.QueryEscape(redirectURI))
 
 	// 禁止自动跟随 302 重定向以提取 session_id
 	client := &http.Client{
@@ -185,7 +194,7 @@ func main() {
 	tokenForm.Set("client_id", clientID)
 	tokenForm.Set("client_secret", clientSecret)
 
-	tokenResp, err := http.PostForm(fmt.Sprintf("http://%s/token", oneAuthHost), tokenForm)
+	tokenResp, err := http.PostForm(fmt.Sprintf("http://%s/%s/token", oneAuthHost, issuerSlug), tokenForm)
 	if err != nil {
 		log.Fatalf("❌ 请求 /token 失败: %v", err)
 	}
