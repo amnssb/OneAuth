@@ -94,7 +94,8 @@ func migrate() error {
 			('custom_css', ''),
 			('target_group_id', '87654321'),
 			('onebot_token', 'oneauth_secure_secret_token'),
-			('code_ttl', '180');`,
+			('code_ttl', '180'),
+			('demo_enabled', 'true');`,
 	}
 
 	for _, q := range queries {

@@ -328,7 +328,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/clients", SecureHeaders(authMiddleware(handleCreateClient)))
 	mux.HandleFunc("PUT /api/admin/clients/{id}", SecureHeaders(authMiddleware(handleUpdateClient)))
 	mux.HandleFunc("DELETE /api/admin/clients/{id}", SecureHeaders(authMiddleware(handleDeleteClient)))
+	mux.HandleFunc("GET /api/admin/setup", SecureHeaders(handleSetupStatus))
 	mux.HandleFunc("POST /api/admin/setup", SecureHeaders(handleInitialSetup))
+	mux.HandleFunc("POST /api/admin/preview-login", SecureHeaders(authMiddleware(handlePreviewLogin)))
 	mux.HandleFunc("POST /api/admin/password", SecureHeaders(authMiddleware(handleChangePassword)))
 }
 
@@ -427,6 +429,17 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSetupStatus 供登录弹窗判断当前是走"首次初始化"还是"日常登录"分支：
+// 前端在展示登录弹窗之前先查一次，管理员表为空则渲染初始化表单。
+func handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
+		writeError(w, http.StatusInternalServerError, "Internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"initialized": count > 0})
+}
+
 func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	if wait := limiter.blocked(ip); wait > 0 {
@@ -482,6 +495,25 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handlePreviewLogin 供管理后台"预览登录页"按钮使用：/login 路由强依赖一个
+// 真实存在的 session_id（只能从完整走一遍 /authorize 拿到），管理员直接打开
+// /login 必然命中 400。这里代其创建一个不绑定任何 OIDC 客户端的一次性会话
+// （client_id 留空，GetClientBranding 查不到对应客户端时会落回全局设置，
+// 与预览"当前全局配置效果"的诉求一致），返回 session_id 供前端跳转。
+func handlePreviewLogin(w http.ResponseWriter, r *http.Request) {
+	ttlStr := database.GetSetting("code_ttl", "180")
+	ttl, _ := strconv.Atoi(ttlStr)
+	if ttl <= 0 {
+		ttl = 180
+	}
+	sess, err := session.DefaultManager.CreateSession("", "", "", "", ttl)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "预览会话创建失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"session_id": sess.SessionID})
+}
+
 // ---- 系统设置 ----
 
 var allowedSettings = map[string]bool{
@@ -493,6 +525,7 @@ var allowedSettings = map[string]bool{
 	"onebot_token":    true,
 	"code_ttl":        true,
 	"site_logo":       true,
+	"demo_enabled":    true,
 }
 
 func settingLabel(key string) string {
@@ -505,6 +538,7 @@ func settingLabel(key string) string {
 		"onebot_token":    "OneBot Token",
 		"code_ttl":        "验证码有效期",
 		"site_logo":       "站点 Logo URL",
+		"demo_enabled":    "内置体验应用开关",
 	}
 	if l, ok := labels[key]; ok {
 		return l
@@ -559,6 +593,11 @@ func validateSetting(key, val string) error {
 			return errors.New("验证码有效期须为 10~3600 秒")
 		}
 		return nil
+	case "demo_enabled":
+		if val != "true" && val != "false" {
+			return errors.New(settingLabel(key) + " 只能为 true 或 false")
+		}
+		return nil
 	}
 	return fmt.Errorf("不支持的设置项: %s", key)
 }
@@ -573,6 +612,7 @@ func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"onebot_token":    database.GetSetting("onebot_token", ""),
 		"code_ttl":        database.GetSetting("code_ttl", ""),
 		"site_logo":       database.GetSetting("site_logo", ""),
+		"demo_enabled":    database.GetSetting("demo_enabled", "true"),
 	}
 	writeJSON(w, http.StatusOK, settings)
 }

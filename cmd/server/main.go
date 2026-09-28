@@ -124,18 +124,16 @@ func main() {
 		}
 	}))
 
-	// 预置或确保 Demo 测试应用存在
+	// 预置或确保 Demo 测试应用存在（是否对外可访问由 demo_enabled 开关控制）
 	initDemoClient()
 
-	// 根路径重定向
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/demo", http.StatusFound)
-	})
+	// 根路径：始终展示 OneAuth 首页，不再依赖 Demo 是否启用
+	mux.HandleFunc("GET /{$}", handleHomePage)
 
-	// 内置测试 Demo 应用主页
-	mux.HandleFunc("GET /demo", handleDemoPage)
-	// 内置测试 Demo 应用 OAuth2 回调端点
-	mux.HandleFunc("GET /demo/callback", handleDemoCallback)
+	// 内置测试 Demo 应用主页 / OAuth2 回调端点：受 demo_enabled 开关控制，
+	// 关闭时对外表现为 404（而非报错或跳转），避免暴露内部状态。
+	mux.HandleFunc("GET /demo", demoGuard(handleDemoPage))
+	mux.HandleFunc("GET /demo/callback", demoGuard(handleDemoCallback))
 
 	log.Printf("🚀 OneAuth 已启动 → http://0.0.0.0:%s\n", port)
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
@@ -194,6 +192,124 @@ const (
 	demoClientID     = "oneauth_demo_app"
 	demoClientSecret = "demo_secret_888888"
 )
+
+// demoGuard 用 demo_enabled 系统设置包裹 demo 相关 handler：关闭时统一
+// 返回 404，不泄露 demo 路由是否存在，也不影响其余路由的正常访问。
+func demoGuard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if database.GetSetting("demo_enabled", "true") != "true" {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// handleHomePage 是根路径 "/" 的固定首页：不依赖 Demo 开关，始终可访问，
+// 展示站点基本信息并按需引导到登录/管理后台/Demo 体验入口。
+func handleHomePage(w http.ResponseWriter, r *http.Request) {
+	siteName := database.GetSetting("site_name", "统一身份认证中心")
+	demoOn := database.GetSetting("demo_enabled", "true") == "true"
+
+	demoBlock := ""
+	if demoOn {
+		demoBlock = `
+        <a class="btn-primary" href="/demo">
+            <span>🚀 体验 Demo 接入应用</span>
+        </a>`
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	html := `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.SiteName}}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: #060813;
+            color: #94a3b8;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .home-card {
+            background: rgba(19, 26, 53, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(28px);
+            border-radius: 28px;
+            padding: 48px 40px;
+            max-width: 520px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+        }
+        .home-badge {
+            display: inline-block;
+            background: rgba(0, 212, 255, 0.15);
+            color: #00d4ff;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 4px 12px;
+            border-radius: 20px;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+        }
+        h1 { font-size: 1.9rem; font-weight: 800; color: #f8fafc; margin-bottom: 12px; }
+        p { font-size: 0.95rem; line-height: 1.6; margin-bottom: 28px; }
+        .btn-primary, .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            padding: 15px 28px;
+            border-radius: 14px;
+            text-decoration: none;
+            font-size: 1.02rem;
+            font-weight: 700;
+            transition: all 0.25s;
+            margin-bottom: 14px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff 0%, #0066ff 100%);
+            color: #000;
+            box-shadow: 0 10px 28px rgba(0, 212, 255, 0.35);
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 14px 34px rgba(0, 212, 255, 0.5);
+            filter: brightness(1.08);
+        }
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: #cbd5e1;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
+    </style>
+</head>
+<body>
+    <div class="home-card">
+        <span class="home-badge">OpenID Connect Provider</span>
+        <h1>{{.SiteName}}</h1>
+        <p>基于 OIDC 协议的统一身份认证服务，为接入的业务系统提供群验证码单点登录能力。</p>
+        {{.DemoBlock}}
+        <a class="btn-secondary" href="/admin">⚙️ 进入管理员控制台</a>
+    </div>
+</body>
+</html>`
+	html = strings.Replace(html, "{{.SiteName}}", template.HTMLEscapeString(siteName), -1)
+	html = strings.Replace(html, "{{.DemoBlock}}", demoBlock, 1)
+	_, _ = w.Write([]byte(html))
+}
 
 func initDemoClient() {
 	h := sha256.Sum256([]byte(demoClientSecret))

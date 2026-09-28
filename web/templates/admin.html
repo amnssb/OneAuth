@@ -447,7 +447,7 @@
             font-size: 1rem;
             pointer-events: none;
         }
-        .form-group input, .form-group textarea {
+        .form-group input, .form-group textarea, .form-group select {
             width: 100%;
             padding: 11px 16px 11px 40px;
             background: var(--ai-field-bg);
@@ -466,8 +466,8 @@
             line-height: 1.5;
             resize: vertical;
         }
-        .form-group input:hover, .form-group textarea:hover { background: var(--ai-field-bg-hover); }
-        .form-group input:focus, .form-group textarea:focus {
+        .form-group input:hover, .form-group textarea:hover, .form-group select:hover { background: var(--ai-field-bg-hover); }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
             background: var(--ai-field-bg);
             box-shadow: 0 0 0 2px var(--ai-surface-card), 0 0 0 4px var(--ai-focus-shadow);
         }
@@ -744,7 +744,9 @@
 <body>
     <div class="bg-layer" id="adminBgLayer"></div>
 
-    <!-- 登录与初始化弹窗 -->
+    <!-- 登录与初始化弹窗：initCheck() 先查 /api/admin/setup，管理员表为空时
+         显示"创建管理员"表单（authMode='setup'），否则显示日常登录表单
+         （authMode='login'），同一套输入框依据 authMode 切换提交目标。 -->
     <div class="login-overlay" id="loginOverlay">
         <div class="login-box">
             <div class="login-logo">✦</div>
@@ -765,8 +767,15 @@
                     <input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')document.getElementById('authBtn').click()">
                 </div>
             </div>
+            <div class="form-group hidden" id="setupConfirmGroup" style="text-align: left;">
+                <label>确认密码</label>
+                <div class="input-wrapper">
+                    <span class="input-icon">🔒</span>
+                    <input type="password" id="loginPassConfirm" placeholder="再次输入密码" onkeydown="if(event.key==='Enter')document.getElementById('authBtn').click()">
+                </div>
+            </div>
             <button class="btn btn-primary" style="width:100%; margin-top: 6px;" id="authBtn" onclick="submitAuth(this)">
-                <span>进入控制台</span> ➔
+                <span id="authBtnText">进入控制台</span> ➔
             </button>
         </div>
     </div>
@@ -915,9 +924,9 @@
                         <p>监控 OneAuth 核心服务状态、OIDC 端点及 OneBot 连通性。</p>
                     </div>
                     <div class="header-actions">
-                        <a href="/login" target="_blank" class="btn btn-secondary">
+                        <button class="btn btn-secondary" onclick="withBusy(this, previewLogin)">
                             <span>👁️ 查看前台授权页</span> ↗
-                        </a>
+                        </button>
                         <div class="header-status-card">
                             <div class="status-metric">
                                 <span class="metric-label">服务运行时间</span>
@@ -1017,9 +1026,9 @@
                         <p>调整登录端展示的站点标识、背景视觉渲染以及个性化样式注入。</p>
                     </div>
                     <div class="header-actions">
-                        <a href="/login" target="_blank" class="btn btn-secondary">
+                        <button class="btn btn-secondary" onclick="withBusy(this, previewLogin)">
                             <span>👁️ 预览授权页效果</span> ↗
-                        </a>
+                        </button>
                     </div>
                 </div>
 
@@ -1063,6 +1072,35 @@
                     <div style="display:flex; justify-content:flex-end;">
                         <button class="btn btn-primary" onclick="withBusy(this, () => saveSettings('appearance'))">
                             <span>💾 保存外观设置</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">🧪</span>
+                            <div>
+                                <div class="card-title">内置体验应用 (Demo)</div>
+                                <div class="card-desc">关闭后 /demo 与 /demo/callback 将返回 404，根路径 / 始终展示首页。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>是否启用 Demo 体验应用</label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">🔀</span>
+                                <select id="demoEnabled">
+                                    <option value="true">启用</option>
+                                    <option value="false">关闭</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:flex-end;">
+                        <button class="btn btn-primary" onclick="withBusy(this, () => saveSettings('demo'))">
+                            <span>💾 保存 Demo 设置</span>
                         </button>
                     </div>
                 </div>
@@ -1251,13 +1289,32 @@
     let statsTimer = null;
     let serverUptime = null;
     let lastSync = 0;
+    let authMode = 'login';
 
     const $ = id => document.getElementById(id);
 
+    // initCheck 决定登录弹窗展示哪套表单：管理员表为空（全新部署）时走
+    // "创建管理员"分支，否则走日常登录 —— 修复此前"首次部署无 UI 入口创建
+    // 管理员"的问题（只能绕过前端手工调用 /api/admin/setup）。
     async function initCheck() {
         if (token) {
             showApp();
             return;
+        }
+        try {
+            const res = await fetch('/api/admin/setup');
+            const data = await res.json().catch(() => ({}));
+            authMode = data.initialized ? 'login' : 'setup';
+        } catch (e) {
+            authMode = 'login';
+        }
+        if (authMode === 'setup') {
+            $('authModalTitle').innerText = '初始化 OneAuth 控制台';
+            $('authModalDesc').innerText = '首次使用，请创建管理员账号（仅可创建一次）';
+            $('loginUser').placeholder = '设置管理员账号';
+            $('loginPass').placeholder = '设置密码（至少 6 位）';
+            $('setupConfirmGroup').classList.remove('hidden');
+            $('authBtnText').innerText = '创建管理员并进入';
         }
         $('loginOverlay').classList.remove('hidden');
     }
@@ -1307,19 +1364,48 @@
         const pass = $('loginPass').value;
         if (!user || !pass) return showToast('请输入用户名和密码', 'error');
 
-        await withBusy(btn, async () => {
-            const data = await apiFetch('/api/admin/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username: user, password: pass})
-            }, { allow401: true });
-            token = data.token;
-            localStorage.setItem('admin_token', token);
-            $('displayUsername').innerText = user;
-            $('loginPass').value = '';
-            showApp();
-            showToast('欢迎回来，管理员！', 'success');
-        });
+        if (authMode === 'setup') {
+            const confirmPass = $('loginPassConfirm').value;
+            if (pass.length < 6) return showToast('密码长度至少需要 6 个字符', 'error');
+            if (pass !== confirmPass) return showToast('两次输入的密码不一致', 'error');
+
+            await withBusy(btn, async () => {
+                await apiFetch('/api/admin/setup', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: user, password: pass})
+                }, { allow401: true });
+                showToast('管理员创建成功，正在登录…', 'success');
+                authMode = 'login';
+                await doLogin(user, pass);
+            });
+            return;
+        }
+
+        await withBusy(btn, () => doLogin(user, pass));
+    }
+
+    async function doLogin(user, pass) {
+        const data = await apiFetch('/api/admin/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username: user, password: pass})
+        }, { allow401: true });
+        token = data.token;
+        localStorage.setItem('admin_token', token);
+        $('displayUsername').innerText = user;
+        $('loginPass').value = '';
+        showApp();
+        showToast('欢迎回来，管理员！', 'success');
+    }
+
+    // previewLogin：/login 强依赖真实存在的 session_id（只能从完整走一遍
+    // /authorize 拿到），直接跳 /login 必现 400。这里先向后端要一个不绑定
+    // 任何客户端的一次性预览会话，再带 session_id 跳转 —— 展示的是当前
+    // 全局设置渲染出的登录页效果，验证码/群号仅为占位，不能真正核销。
+    async function previewLogin() {
+        const data = await apiFetch('/api/admin/preview-login', { method: 'POST' });
+        window.open('/login?session_id=' + encodeURIComponent(data.session_id), '_blank');
     }
 
     function showApp() {
@@ -1341,6 +1427,7 @@
             $('groupId').value = s.target_group_id || '';
             $('botToken').value = s.onebot_token || '';
             $('codeTtl').value = s.code_ttl || '180';
+            $('demoEnabled').value = s.demo_enabled === 'false' ? 'false' : 'true';
 
             $('statTargetGroup').innerText = s.target_group_id || '未配置';
             $('statCodeTtl').innerText = (s.code_ttl || '180') + 's';
@@ -1367,13 +1454,19 @@
             onebot_token: $('botToken').value,
             code_ttl: $('codeTtl').value
         };
+        const demo = {
+            demo_enabled: $('demoEnabled').value
+        };
         if (scope === 'bot' || !scope) {
             const ttl = bot.code_ttl.trim();
             if (ttl !== '' && (!/^\d+$/.test(ttl) || +ttl < 10 || +ttl > 3600)) {
                 throw new Error('验证码有效期须为 10~3600 秒');
             }
         }
-        const body = scope === 'bot' ? bot : scope === 'appearance' ? appearance : Object.assign({}, appearance, bot);
+        const body = scope === 'bot' ? bot
+            : scope === 'appearance' ? appearance
+            : scope === 'demo' ? demo
+            : Object.assign({}, appearance, bot, demo);
         await apiFetch('/api/admin/settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
