@@ -148,10 +148,8 @@ func processEvent(raw []byte) {
 		event["post_type"] = "message"
 	}
 
-	targetGroupID := database.GetSetting("target_group_id", "")
-	if targetGroupID == "" {
-		return
-	}
+	// 应用级群绑定后不再按全局群号过滤消息：任意群的消息都可能携带某个
+	// 会话的验证码，来源群是否匹配由 VerifyCode 对照会话绑定的群判断。
 
 	var groupID string
 	var userID string
@@ -183,9 +181,9 @@ func processEvent(raw []byte) {
 		}
 	}
 
-	// 心跳回显、私聊、notice/request 事件、非目标群消息：与验证码无关，
+	// 心跳回显、私聊、notice/request 事件：与验证码无关，
 	// 静默忽略，不再打 "Ignored message" 刷屏。
-	if groupID == "" || userID == "" || groupID != targetGroupID {
+	if groupID == "" || userID == "" {
 		return
 	}
 
@@ -194,14 +192,14 @@ func processEvent(raw []byte) {
 	if selfSent {
 		origin = "self/admin"
 	}
-	log.Printf("[OneBot] Received target group message: '%s' from user: '%s' (%s)", loggable(text), userID, origin)
+	log.Printf("[OneBot] Received group message: '%s' from user: '%s' group: '%s' (%s)", loggable(text), userID, groupID, origin)
 
 	if codeRegex.MatchString(text) {
-		sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, text, userID)
+		sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, text, userID, groupID)
 		if ok {
 			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", text, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
 		} else {
-			log.Printf("[OneBot] ✗ 验证码匹配未成功: code='%s' not found or expired", text)
+			log.Printf("[OneBot] ✗ 验证码匹配未成功: code='%s' not found or expired or group mismatch", text)
 		}
 		return
 	}
@@ -210,7 +208,7 @@ func processEvent(raw []byte) {
 	// so a message that quotes two codes consumes the last one actually sent.
 	if match := codeSearchRegex.FindAllString(text, -1); len(match) > 0 {
 		candidate := match[len(match)-1]
-		if sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, candidate, userID); ok {
+		if sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, candidate, userID, groupID); ok {
 			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", candidate, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
 			return
 		}

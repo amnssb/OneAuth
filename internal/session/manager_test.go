@@ -18,7 +18,7 @@ func TestConcurrentCreateSessionUniqueCodes(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			s, err := m.CreateSession("client", "http://localhost/cb", "state", "", 60)
+			s, err := m.CreateSession("client", "http://localhost/cb", "state", "", "87654321", 60)
 			if err != nil {
 				t.Errorf("CreateSession failed: %v", err)
 				return
@@ -47,7 +47,7 @@ func TestConcurrentVerifyCodeSingleUse(t *testing.T) {
 
 	sessions := make([]*AuthSession, n)
 	for i := 0; i < n; i++ {
-		s, err := m.CreateSession("client", "http://localhost/cb", "", "", 60)
+		s, err := m.CreateSession("client", "http://localhost/cb", "", "", "87654321", 60)
 		if err != nil {
 			t.Fatalf("setup failed: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestConcurrentVerifyCodeSingleUse(t *testing.T) {
 			wg.Add(1)
 			go func(s *AuthSession) {
 				defer wg.Done()
-				if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); ok {
+				if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "87654321"); ok {
 					atomic.AddInt64(&successCount, 1)
 				}
 			}(sessions[i])
@@ -79,7 +79,7 @@ func TestConcurrentVerifyCodeSingleUse(t *testing.T) {
 // 过期会话核销必须失败。
 func TestVerifyCodeExpired(t *testing.T) {
 	m := NewManager()
-	s, err := m.CreateSession("client", "http://localhost/cb", "", "", 60)
+	s, err := m.CreateSession("client", "http://localhost/cb", "", "", "87654321", 60)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
@@ -88,15 +88,41 @@ func TestVerifyCodeExpired(t *testing.T) {
 	s.ExpiresAt = time.Now().Add(-time.Second)
 	m.mu.Unlock()
 
-	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); ok {
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "87654321"); ok {
 		t.Fatal("expired code must not verify")
+	}
+}
+
+// 群绑定回归：验证码只能在会话绑定的群内核销 —— 错误群拒绝且不消耗
+// 验证码；未绑定群（GroupID 为空）的会话一律拒绝核销。
+func TestVerifyCodeGroupBinding(t *testing.T) {
+	m := NewManager()
+	s, err := m.CreateSession("client", "http://localhost/cb", "", "", "111111", 60)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "999999"); ok {
+		t.Fatal("code from a wrong group must not verify")
+	}
+	// 被错误群拒绝后，验证码必须仍然可用（未被消耗）。
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "111111"); !ok {
+		t.Fatal("code must remain verifiable in its bound group")
+	}
+
+	nogroup, err := m.CreateSession("client", "http://localhost/cb", "", "", "", 60)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if _, ok := m.VerifyCode("qq", nogroup.VerifyCode, "10001", "111111"); ok {
+		t.Fatal("session without a bound group must not verify")
 	}
 }
 
 // SSE 等待路径：核销后 NotifyChan 必须被关闭以唤醒等待方。
 func TestNotifyChanClosedOnVerify(t *testing.T) {
 	m := NewManager()
-	s, err := m.CreateSession("client", "http://localhost/cb", "", "", 60)
+	s, err := m.CreateSession("client", "http://localhost/cb", "", "", "87654321", 60)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
@@ -107,7 +133,7 @@ func TestNotifyChanClosedOnVerify(t *testing.T) {
 		close(done)
 	}()
 
-	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001"); !ok {
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "87654321"); !ok {
 		t.Fatal("verify failed")
 	}
 	select {

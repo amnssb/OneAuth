@@ -84,7 +84,8 @@ func migrate() error {
 			display_name TEXT,
 			background_url TEXT,
 			prompt_text TEXT,
-			custom_css TEXT
+			custom_css TEXT,
+			target_group_id TEXT
 		);`,
 		`CREATE TABLE IF NOT EXISTS admin_users (
 			username TEXT PRIMARY KEY,
@@ -119,9 +120,9 @@ func migrate() error {
 		}
 	}
 
-	// v2 迁移：per-client 登录页品牌覆盖。旧库的 oidc_clients 没有这几列，
-	// CREATE TABLE IF NOT EXISTS 对已存在的表不生效，这里逐列幂等补齐。
-	// NULL / 空串 = 继承全局设置。
+	// v2 迁移：per-client 登录页品牌覆盖；应用级验证群号 target_group_id
+	// 也走同一列补齐。旧库的 oidc_clients 没有这几列，CREATE TABLE IF NOT
+	// EXISTS 对已存在的表不生效，这里逐列幂等补齐。NULL / 空串 = 继承全局设置。
 	existing := map[string]bool{}
 	colRows, err := WriteDB.Query("PRAGMA table_info(oidc_clients)")
 	if err != nil {
@@ -138,7 +139,7 @@ func migrate() error {
 	}
 	colRows.Close()
 
-	for _, col := range []string{"display_name", "background_url", "prompt_text", "custom_css"} {
+	for _, col := range []string{"display_name", "background_url", "prompt_text", "custom_css", "target_group_id"} {
 		if !existing[col] {
 			if _, err := WriteDB.Exec("ALTER TABLE oidc_clients ADD COLUMN " + col + " TEXT"); err != nil {
 				return err
@@ -440,19 +441,24 @@ func PurgeExpiredTenantKeys(slug string, grace time.Duration) error {
 	return err
 }
 
-// GetClientBranding 返回一个 OIDC 客户端的登录页品牌覆盖；未设置的字段为
-// 空串，由调用方回落到全局设置。这让同一个 OneAuth 可以给多个接入项目
-// 呈现各自不同的登录页。
+// GetClientBranding 返回一个 OIDC 客户端的登录页品牌覆盖与应用级验证群号
+// （target_group_id）；未设置的字段为空串，由调用方回落到全局设置。这让
+// 同一个 OneAuth 可以给多个接入项目呈现各自不同的登录页与核验群。
 func GetClientBranding(clientID string) map[string]string {
-	out := map[string]string{"display_name": "", "background_url": "", "prompt_text": "", "custom_css": ""}
+	out := map[string]string{"display_name": "", "background_url": "", "prompt_text": "", "custom_css": "", "target_group_id": ""}
+	if clientID == "" {
+		return out
+	}
 	row := DB.QueryRow(`
 		SELECT COALESCE(display_name, ''), COALESCE(background_url, ''),
-		       COALESCE(prompt_text, ''), COALESCE(custom_css, '')
+		       COALESCE(prompt_text, ''), COALESCE(custom_css, ''),
+		       COALESCE(target_group_id, '')
 		FROM oidc_clients WHERE client_id = ?`, clientID)
-	var dn, bg, pt, css string
-	if err := row.Scan(&dn, &bg, &pt, &css); err == nil {
+	var dn, bg, pt, css, gid string
+	if err := row.Scan(&dn, &bg, &pt, &css, &gid); err == nil {
 		out["display_name"], out["background_url"] = dn, bg
 		out["prompt_text"], out["custom_css"] = pt, css
+		out["target_group_id"] = gid
 	}
 	return out
 }

@@ -32,11 +32,11 @@ func TestTokenIssuanceQQIdentity(t *testing.T) {
 		"INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug) VALUES (?, ?, ?, ?, ?)",
 		"t_client", base64.RawURLEncoding.EncodeToString(hash[:]), "t", "http://cb.local/cb", "t-tenant")
 
-	sess, err := session.DefaultManager.CreateSession("t_client", "http://cb.local/cb", "st", "", 60)
+	sess, err := session.DefaultManager.CreateSession("t_client", "http://cb.local/cb", "st", "", "777777", 60)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "10001"); !ok {
+	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "10001", "777777"); !ok {
 		t.Fatal("verify code failed")
 	}
 	authCode, _, ok := session.DefaultManager.IssueAuthCode(sess.SessionID)
@@ -111,11 +111,11 @@ func setupTenantClient(t *testing.T, clientID, secret, slug string) {
 // mintToken 走完整核销流程，返回某租户签发的 id_token。
 func mintToken(t *testing.T, clientID, secret, slug string) string {
 	t.Helper()
-	sess, err := session.DefaultManager.CreateSession(clientID, "http://cb.local/cb", "st", "", 60)
+	sess, err := session.DefaultManager.CreateSession(clientID, "http://cb.local/cb", "st", "", "777777", 60)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "20002"); !ok {
+	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "20002", "777777"); !ok {
 		t.Fatal("verify code failed")
 	}
 	authCode, _, ok := session.DefaultManager.IssueAuthCode(sess.SessionID)
@@ -211,5 +211,59 @@ func TestUserinfoTenantIsolation(t *testing.T) {
 	}
 	if code := callUserinfo("tenant-b", tokenA); code != http.StatusUnauthorized {
 		t.Fatalf("token A at tenant B must be rejected, got %d", code)
+	}
+}
+
+// 按应用绑定验证群回归：authorize 建会话时，应用级 target_group_id 优先，
+// 未设置的应用回落全局 target_group_id。
+func TestAuthorizeResolvesClientGroup(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "grp.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	if err := database.SetSetting("target_group_id", "10000"); err != nil {
+		t.Fatalf("set global group: %v", err)
+	}
+
+	hash := sha256.Sum256([]byte("s1"))
+	secretHash := base64.RawURLEncoding.EncodeToString(hash[:])
+	if _, err := database.WriteDB.Exec(
+		"INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug, target_group_id) VALUES (?, ?, 'g', 'http://cb.local/cb', 'grp-tenant', '20000')",
+		"grp_client", secretHash,
+	); err != nil {
+		t.Fatalf("insert client with own group: %v", err)
+	}
+	if _, err := database.WriteDB.Exec(
+		"INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug) VALUES (?, ?, 'i', 'http://cb.local/cb', 'inherit-tenant')",
+		"inherit_client", secretHash,
+	); err != nil {
+		t.Fatalf("insert client without group: %v", err)
+	}
+
+	groupOf := func(slug, clientID string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet,
+			"/"+slug+"/authorize?client_id="+clientID+"&redirect_uri=http://cb.local/cb&response_type=code&scope=openid", nil)
+		req.SetPathValue("slug", slug)
+		rec := httptest.NewRecorder()
+		handleAuthorize(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("authorize %s status = %d body=%s", clientID, rec.Code, rec.Body.String())
+		}
+		sess, ok := session.DefaultManager.GetSession(strings.TrimPrefix(rec.Header().Get("Location"), "/login?session_id="))
+		if !ok {
+			t.Fatalf("session for %s not found", clientID)
+		}
+		return sess.GroupID
+	}
+
+	if g := groupOf("grp-tenant", "grp_client"); g != "20000" {
+		t.Fatalf("per-client group must win, got %q", g)
+	}
+	if g := groupOf("inherit-tenant", "inherit_client"); g != "10000" {
+		t.Fatalf("empty per-client group must fall back to global, got %q", g)
 	}
 }

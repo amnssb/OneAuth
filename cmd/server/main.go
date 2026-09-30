@@ -102,7 +102,7 @@ func main() {
 		data := map[string]interface{}{
 			"SessionID":     sess.SessionID,
 			"VerifyCode":    sess.VerifyCode,
-			"GroupID":       database.GetSetting("target_group_id", ""),
+			"GroupID":       sess.GroupID,
 			"SiteName":      siteName,
 			"PromptText":    prompt,
 			"BackgroundURL": background,

@@ -23,6 +23,10 @@ type AuthSession struct {
 	State         string
 	CodeChallenge string
 	VerifyCode    string
+	// GroupID 是该会话绑定的核验 QQ 群号。由发起授权的应用决定
+	// （应用级 target_group_id），为空时回落到全局设置。核销时
+	// 必须与消息来源群号一致，否则拒绝核销。
+	GroupID       string
 	// 核销后的平台身份：Provider 标识来源平台（见 internal/identity），
 	// UserID 为该平台内的用户标识（qq 平台下即 QQ 号）。
 	// 核销前两者均为空。
@@ -95,7 +99,7 @@ func randomCode(length int) (string, error) {
 	return string(out), nil
 }
 
-func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, ttlSeconds int) (*AuthSession, error) {
+func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID string, ttlSeconds int) (*AuthSession, error) {
 	sessionID, err := generateRandomHex(16)
 	if err != nil {
 		return nil, err
@@ -120,6 +124,7 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, 
 			State:         state,
 			CodeChallenge: challenge,
 			VerifyCode:    code,
+			GroupID:       groupID,
 			Status:        StatusPending,
 			ExpiresAt:     time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 			NotifyChan:    make(chan struct{}),
@@ -135,7 +140,8 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge string, 
 
 // VerifyCode 把验证码核销为平台身份并绑定到会话。provider 标识核销通道
 // 来源（当前仅 identity.ProviderQQ，新平台接入各自通道时传自己的标识）。
-func (m *Manager) VerifyCode(provider, code, userID string) (*AuthSession, bool) {
+// groupID 为消息来源群号，必须与会话绑定的 GroupID 一致才允许核销。
+func (m *Manager) VerifyCode(provider, code, userID, groupID string) (*AuthSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -145,6 +151,12 @@ func (m *Manager) VerifyCode(provider, code, userID string) (*AuthSession, bool)
 	}
 
 	if time.Now().After(session.ExpiresAt) || session.Status != StatusPending {
+		return nil, false
+	}
+
+	// 群号必须与会话绑定的群一致：应用级群绑定后，不同应用的验证码
+	// 只能在各自绑定的群内核销，防止跨群冒用。
+	if session.GroupID == "" || groupID != session.GroupID {
 		return nil, false
 	}
 

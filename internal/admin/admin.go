@@ -508,7 +508,7 @@ func handlePreviewLogin(w http.ResponseWriter, r *http.Request) {
 	if ttl <= 0 {
 		ttl = 180
 	}
-	sess, err := session.DefaultManager.CreateSession("", "", "", "", ttl)
+	sess, err := session.DefaultManager.CreateSession("", "", "", "", database.GetSetting("target_group_id", ""), ttl)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "预览会话创建失败")
 		return
@@ -536,7 +536,7 @@ func settingLabel(key string) string {
 		"prompt_text":     "提示文案",
 		"background_url":  "背景图 URL",
 		"custom_css":      "自定义 CSS",
-		"target_group_id": "QQ 群号",
+		"target_group_id": "默认 QQ 群号",
 		"onebot_token":    "OneBot Token",
 		"code_ttl":        "验证码有效期",
 		"site_logo":       "站点 Logo URL",
@@ -717,6 +717,7 @@ type ClientInfo struct {
 	BackgroundURL string `json:"background_url"`
 	PromptText    string `json:"prompt_text"`
 	CustomCSS     string `json:"custom_css"`
+	TargetGroupID string `json:"target_group_id"`
 	IssuerSlug    string `json:"issuer_slug"`
 	Kid           string `json:"kid"`
 }
@@ -728,6 +729,7 @@ type clientRequest struct {
 	BackgroundURL string `json:"background_url"`
 	PromptText    string `json:"prompt_text"`
 	CustomCSS     string `json:"custom_css"`
+	TargetGroupID string `json:"target_group_id"`
 	// IssuerSlug 仅在创建时使用（创建后不可变），编辑请求会忽略此字段。
 	IssuerSlug string `json:"issuer_slug"`
 }
@@ -763,12 +765,19 @@ func validateClientRequest(req *clientRequest) error {
 	if err := validateSetting("custom_css", req.CustomCSS); err != nil {
 		return err
 	}
+	// 应用级群号校验：为空表示继承全局设置，非空时必须是纯数字。
+	if req.TargetGroupID != "" {
+		if _, err := strconv.ParseUint(req.TargetGroupID, 10, 64); err != nil {
+			return errors.New("QQ 群号必须是纯数字")
+		}
+	}
 	return nil
 }
 
 const clientColumns = `client_id, client_name, redirect_uris, created_at,
 	COALESCE(display_name, ''), COALESCE(background_url, ''),
-	COALESCE(prompt_text, ''), COALESCE(custom_css, ''), COALESCE(issuer_slug, '')`
+	COALESCE(prompt_text, ''), COALESCE(custom_css, ''),
+	COALESCE(target_group_id, ''), COALESCE(issuer_slug, '')`
 
 func handleListClients(w http.ResponseWriter, r *http.Request) {
 	rows, err := database.DB.Query("SELECT " + clientColumns + " FROM oidc_clients ORDER BY created_at")
@@ -782,7 +791,8 @@ func handleListClients(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c ClientInfo
 		if err := rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.CreatedAt,
-			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS, &c.IssuerSlug); err != nil {
+			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS,
+			&c.TargetGroupID, &c.IssuerSlug); err != nil {
 			continue
 		}
 		// 附带当前在用签名密钥的 kid，供后台展示；没有则留空（应用刚建、
@@ -872,10 +882,10 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 	_, err := database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris,
-			display_name, background_url, prompt_text, custom_css, issuer_slug)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			display_name, background_url, prompt_text, custom_css, target_group_id, issuer_slug)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		clientID, secretHash, req.ClientName, req.RedirectURIs,
-		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, slug)
+		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, req.TargetGroupID, slug)
 	if err != nil {
 		log.Printf("[管理后台] 创建客户端失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "Internal error")
@@ -911,10 +921,11 @@ func handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 
 	res, err := database.WriteDB.Exec(`
 		UPDATE oidc_clients SET client_name = ?, redirect_uris = ?,
-			display_name = ?, background_url = ?, prompt_text = ?, custom_css = ?
+			display_name = ?, background_url = ?, prompt_text = ?, custom_css = ?,
+			target_group_id = ?
 		WHERE client_id = ?`,
 		req.ClientName, req.RedirectURIs,
-		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, id)
+		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, req.TargetGroupID, id)
 	if err != nil {
 		log.Printf("[管理后台] 更新客户端 %s 失败: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "Internal error")

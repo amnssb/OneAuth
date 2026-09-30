@@ -863,6 +863,13 @@
                 <label>自定义 CSS <span class="label-hint">仅作用于该项目的登录页</span></label>
                 <textarea id="editCustomCss" rows="4"></textarea>
             </div>
+            <div class="form-group">
+                <label>绑定 QQ 群号 <span class="label-hint">留空继承全局设置</span></label>
+                <div class="input-wrapper">
+                    <span class="input-icon">👥</span>
+                    <input id="editTargetGroupID" type="text" placeholder="例如: 87654321">
+                </div>
+            </div>
             <div class="modal-actions">
                 <button class="btn btn-secondary" onclick="closeEditModal()">取消</button>
                 <button class="btn btn-primary" onclick="withBusy(this, saveClientEdit)"><span>保存修改</span></button>
@@ -1162,6 +1169,13 @@
                                 <input id="newRedirectURIs" type="text" placeholder="https://git.example.com/user/oauth2/OneAuth/callback">
                             </div>
                         </div>
+                        <div class="form-group">
+                            <label>绑定 QQ 群号 <span class="label-hint">留空继承全局设置</span></label>
+                            <div class="input-wrapper">
+                                <span class="input-icon">👥</span>
+                                <input id="newTargetGroupID" type="text" placeholder="例如: 87654321">
+                            </div>
+                        </div>
                     </div>
                     <div style="display:flex; justify-content:flex-end;">
                         <button class="btn btn-primary" onclick="withBusy(this, createClient)">
@@ -1223,13 +1237,13 @@
                             <span class="card-icon">⚡</span>
                             <div>
                                 <div class="card-title">反向 WebSocket 规则</div>
-                                <div class="card-desc">当收到指定 QQ 群的验证码时，系统将触发原子核销并推送前端跳转。</div>
+                                <div class="card-desc">当收到应用绑定 QQ 群的验证码时，系统将触发原子核销并推送前端跳转。</div>
                             </div>
                         </div>
                     </div>
                     <div class="form-grid">
                         <div class="form-group">
-                            <label>目标审核 QQ 群号 <span class="label-hint">仅此群发出的验证码有效</span></label>
+                            <label>默认验证 QQ 群号 <span class="label-hint">未单独绑定群的应用在此群核销</span></label>
                             <div class="input-wrapper">
                                 <span class="input-icon">👥</span>
                                 <input id="groupId" type="text" placeholder="87654321">
@@ -1583,17 +1597,19 @@
         const name = $('newClientName').value.trim();
         const uris = $('newRedirectURIs').value.trim();
         const slug = $('newIssuerSlug').value.trim().toLowerCase();
+        const gid = $('newTargetGroupID').value.trim();
         if (!name || !uris) throw new Error('请填写应用名称和回调地址');
         if (!slug) throw new Error('请填写 Issuer 标识 (slug)');
 
         const data = await apiFetch('/api/admin/clients', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ client_name: name, redirect_uris: uris, issuer_slug: slug })
+            body: JSON.stringify({ client_name: name, redirect_uris: uris, issuer_slug: slug, target_group_id: gid })
         });
         $('newClientName').value = '';
         $('newRedirectURIs').value = '';
         $('newIssuerSlug').value = '';
+        $('newTargetGroupID').value = '';
         updateIssuerPreview();
         $('secretClientId').textContent = data.client_id || '';
         $('secretClientSecret').textContent = data.client_secret || '';
@@ -1667,6 +1683,7 @@
         $('editBgUrl').value = c.background_url || '';
         $('editPromptText').value = c.prompt_text || '';
         $('editCustomCss').value = c.custom_css || '';
+        $('editTargetGroupID').value = c.target_group_id || '';
         $('editModal').classList.remove('hidden');
     }
 
@@ -1683,7 +1700,8 @@
             display_name: $('editDisplayName').value,
             background_url: $('editBgUrl').value,
             prompt_text: $('editPromptText').value,
-            custom_css: $('editCustomCss').value
+            custom_css: $('editCustomCss').value,
+            target_group_id: $('editTargetGroupID').value
         };
         await apiFetch('/api/admin/clients/' + encodeURIComponent(editClientId), {
             method: 'PUT',

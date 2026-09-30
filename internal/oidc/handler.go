@@ -244,7 +244,15 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		ttl = 180
 	}
 
-	sess, err := session.DefaultManager.CreateSession(clientID, redirectURI, state, codeChallenge, ttl)
+	// 解析该应用绑定的核验群号：应用级 target_group_id 优先，为空则
+	// 回落到全局设置。这样每个应用可以绑定各自独立的审核群。
+	branding := database.GetClientBranding(clientID)
+	groupID := branding["target_group_id"]
+	if groupID == "" {
+		groupID = database.GetSetting("target_group_id", "")
+	}
+
+	sess, err := session.DefaultManager.CreateSession(clientID, redirectURI, state, codeChallenge, groupID, ttl)
 	if err != nil {
 		http.Error(w, "server_error: 会话创建失败", http.StatusInternalServerError)
 		return
