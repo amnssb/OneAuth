@@ -38,14 +38,33 @@ func computeKID(pub *rsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(hash[:8])
 }
 
+// corsMetadata 允许任意来源跨域读取公开的发现文档与 JWKS。OIDC Discovery
+// 规范要求发现端点支持 CORS，否则浏览器端发起的“自动发现”（前端直接
+// fetch 这两个 URL）会被跨域策略拦下；两者均为公开元数据，不含凭证，
+// 通配来源即可。顺带放行 OPTIONS 预检——mux 只注册了 GET，预检原本 405。
+func corsMetadata(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // tenantMux 承载所有 /{slug}/... 追加式租户端点。它必须与主 mux 分开：
 // Go 1.22 ServeMux 认为两段通配（如 /{slug}/authorize）与子树前缀
 // （如 /static/）互不更具体而拒绝共存并 panic。分开注册 + Wrap 里按首段
 // 分流，既保留 https://host/{slug} 的 Issuer 形态，又规避该冲突。
 var tenantMux = func() *http.ServeMux {
 	m := http.NewServeMux()
-	m.HandleFunc("GET /{slug}/.well-known/openid-configuration", handleDiscovery)
-	m.HandleFunc("GET /{slug}/.well-known/jwks.json", handleJWKS)
+	m.HandleFunc("GET /{slug}/.well-known/openid-configuration", corsMetadata(handleDiscovery))
+	m.HandleFunc("OPTIONS /{slug}/.well-known/openid-configuration", corsMetadata(handleDiscovery))
+	m.HandleFunc("GET /{slug}/.well-known/jwks.json", corsMetadata(handleJWKS))
+	m.HandleFunc("OPTIONS /{slug}/.well-known/jwks.json", corsMetadata(handleJWKS))
 	m.HandleFunc("GET /{slug}/authorize", handleAuthorize)
 	m.HandleFunc("POST /{slug}/token", handleToken)
 	m.HandleFunc("GET /{slug}/userinfo", handleUserinfo)
@@ -73,8 +92,8 @@ var reservedFirstSegments = map[string]bool{
 func RegisterRoutes(mux *http.ServeMux) {
 	// RFC 8414 插入式发现路径（部分客户端库把 .well-known 插到 issuer 路径
 	// 之前），与追加式内容一致，最大化兼容。固定前缀，不触发通配冲突。
-	mux.HandleFunc("GET /.well-known/openid-configuration/{slug}", handleDiscovery)
-	mux.HandleFunc("GET /.well-known/jwks.json/{slug}", handleJWKS)
+	mux.HandleFunc("GET /.well-known/openid-configuration/{slug}", corsMetadata(handleDiscovery))
+	mux.HandleFunc("GET /.well-known/jwks.json/{slug}", corsMetadata(handleJWKS))
 
 	// 根发现端点：多 Issuer 下不存在“全局 issuer”，返回明确指引而非 404，
 	// 方便存量接入方自助排障。
