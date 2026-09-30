@@ -119,6 +119,40 @@ func TestVerifyCodeGroupBinding(t *testing.T) {
 	}
 }
 
+// 累计计数回归：CreatedTotal/VerifiedTotal 自启动只增不减，被拒绝的
+// 核销（错误群）不得计入 VerifiedTotal。
+func TestStatsCumulativeCounters(t *testing.T) {
+	m := NewManager()
+	s1, err := m.CreateSession("client", "http://localhost/cb", "", "", "111111", 60)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	s2, err := m.CreateSession("client", "http://localhost/cb", "", "", "222222", 60)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	_ = s2 // 仅需其存在于管理器中参与快照计数
+
+	if _, ok := m.VerifyCode("qq", s1.VerifyCode, "10001", "999999"); ok {
+		t.Fatal("wrong-group verify must fail")
+	}
+	if _, ok := m.VerifyCode("qq", s1.VerifyCode, "10001", "111111"); !ok {
+		t.Fatal("verify failed")
+	}
+
+	st := m.Stats()
+	if st.CreatedTotal != 2 {
+		t.Fatalf("CreatedTotal = %d, want 2", st.CreatedTotal)
+	}
+	if st.VerifiedTotal != 1 {
+		t.Fatalf("VerifiedTotal = %d, want 1", st.VerifiedTotal)
+	}
+	// 实时快照：s1 已核销待回调，s2 仍待核销。
+	if st.Pending != 1 || st.Verified != 1 || st.Total != 2 {
+		t.Fatalf("snapshot = %+v, want pending=1 verified=1 total=2", st)
+	}
+}
+
 // SSE 等待路径：核销后 NotifyChan 必须被关闭以唤醒等待方。
 func TestNotifyChanClosedOnVerify(t *testing.T) {
 	m := NewManager()

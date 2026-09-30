@@ -971,8 +971,8 @@
                     <div class="stat-card">
                         <div class="stat-icon">💬</div>
                         <div class="stat-val" id="statTargetGroup">-</div>
-                        <div class="stat-label">目标验证 QQ 群号</div>
-                        <div class="stat-hint">捕获群内消息指令</div>
+                        <div class="stat-label">默认验证 QQ 群号</div>
+                        <div class="stat-hint">未绑定群的应用在此核销</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon">⏱️</div>
@@ -989,8 +989,8 @@
                     <div class="stat-card">
                         <div class="stat-icon">🧩</div>
                         <div class="stat-val" id="statSessionCount">0</div>
-                        <div class="stat-label">内存登录会话</div>
-                        <div class="stat-hint" id="statSessionHint">待核销 0 · 已验证 0</div>
+                        <div class="stat-label">累计核销登录（自启动）</div>
+                        <div class="stat-hint" id="statSessionHint">待核销 0 · 已完成 0</div>
                     </div>
                 </div>
 
@@ -1794,8 +1794,8 @@
                 $('clientCountPill').innerText = s.clients;
             }
             const sess = s.sessions || {};
-            $('statSessionCount').innerText = sess.total || 0;
-            $('statSessionHint').innerText = '待核销 ' + (sess.pending || 0) + ' · 已验证 ' + (sess.verified || 0);
+            $('statSessionCount').innerText = sess.verified_total || 0;
+            $('statSessionHint').innerText = '待核销 ' + (sess.pending || 0) + ' · 已完成 ' + (sess.consumed || 0);
 
             const bot = s.onebot || {};
             const online = !!bot.connected;

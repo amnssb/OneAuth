@@ -415,11 +415,13 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int64(time.Since(processStart).Seconds()),
 		"started_at":     processStart.UTC().Format(time.RFC3339),
 		"clients":        clientCount,
-		"sessions": map[string]int{
-			"pending":  sessStats.Pending,
-			"verified": sessStats.Verified,
-			"consumed": sessStats.Consumed,
-			"total":    sessStats.Total,
+		"sessions": map[string]any{
+			"pending":        sessStats.Pending,
+			"verified":       sessStats.Verified,
+			"consumed":       sessStats.Consumed,
+			"total":          sessStats.Total,
+			"created_total":  sessStats.CreatedTotal,
+			"verified_total": sessStats.VerifiedTotal,
 		},
 		"onebot": onebot.Status(),
 		"runtime": map[string]any{

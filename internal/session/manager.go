@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,12 @@ type Manager struct {
 	sessions      map[string]*AuthSession
 	codeIndex     map[string]*AuthSession
 	authCodeIndex map[string]*AuthSession
+
+	// 自进程启动以来的累计计数：创建过的会话总数与核销成功次数。
+	// 与 sessions 的实时快照不同，它们只增不减（重启归零），供管理后台
+	// 展示登录活跃度 —— 低流量部署下快照几乎恒为 0，累计值才有参考意义。
+	totalCreated  atomic.Uint64
+	totalVerified atomic.Uint64
 }
 
 var DefaultManager = NewManager()
@@ -132,6 +139,7 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID
 
 		m.sessions[sessionID] = session
 		m.codeIndex[code] = session
+		m.totalCreated.Add(1)
 
 		return session, nil
 	}
@@ -163,6 +171,7 @@ func (m *Manager) VerifyCode(provider, code, userID, groupID string) (*AuthSessi
 	session.Provider = provider
 	session.UserID = userID
 	session.Status = StatusVerified
+	m.totalVerified.Add(1)
 
 	delete(m.codeIndex, code)
 	close(session.NotifyChan)
@@ -217,18 +226,27 @@ func (m *Manager) GetSession(sessionID string) (*AuthSession, bool) {
 }
 
 // SessionStats 是内存会话按状态分布的快照，供管理后台概览轮询展示。
+// CreatedTotal / VerifiedTotal 是自进程启动以来的累计值（只增不减，重启
+// 归零），与上面的实时快照互补：前者回答"发生了多少登录"，后者回答
+// "此刻有多少人在登录途中"。
 type SessionStats struct {
 	Pending  int
 	Verified int
 	Consumed int
 	Total    int
+
+	CreatedTotal  uint64
+	VerifiedTotal uint64
 }
 
 func (m *Manager) Stats() SessionStats {
+	var s SessionStats
+	s.CreatedTotal = m.totalCreated.Load()
+	s.VerifiedTotal = m.totalVerified.Load()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var s SessionStats
 	for _, sess := range m.sessions {
 		switch sess.Status {
 		case StatusPending:
