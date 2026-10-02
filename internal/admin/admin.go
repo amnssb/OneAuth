@@ -25,6 +25,7 @@ import (
 	"oneauth/internal/oidc"
 	"oneauth/internal/onebot"
 	"oneauth/internal/session"
+	"oneauth/internal/version"
 )
 
 const adminSessionTTL = 24 * time.Hour
@@ -112,6 +113,91 @@ func (s *adminSessionStore) janitor() {
 		s.mu.Unlock()
 	}
 }
+
+func (s *adminSessionStore) saveToDB() error {
+	if database.WriteDB == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	now := time.Now().Unix()
+	tx, err := database.WriteDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM transient_admin_sessions"); err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO transient_admin_sessions (token, username, issued_at, exp) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	count := 0
+	for token, claim := range s.sessions {
+		if claim.Exp > now {
+			if _, err := stmt.Exec(token, claim.Username, claim.IssuedAt, claim.Exp); err == nil {
+				count++
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("[无感更新] 已持久化 %d 条管理员令牌用于平滑恢复", count)
+	return nil
+}
+
+func (s *adminSessionStore) restoreFromDB() (int, error) {
+	if database.DB == nil {
+		return 0, nil
+	}
+	now := time.Now().Unix()
+	rows, err := database.DB.Query("SELECT token, username, issued_at, exp FROM transient_admin_sessions WHERE exp > ?", now)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	restored := 0
+	for rows.Next() {
+		var token string
+		var claim adminClaims
+		if err := rows.Scan(&token, &claim.Username, &claim.IssuedAt, &claim.Exp); err != nil {
+			continue
+		}
+		s.sessions[token] = &claim
+		restored++
+	}
+	if restored > 0 {
+		log.Printf("[无感更新] 已从备份成功恢复 %d 条管理员会话", restored)
+	}
+	go func() {
+		if database.WriteDB != nil {
+			_, _ = database.WriteDB.Exec("DELETE FROM transient_admin_sessions WHERE exp <= ?", now)
+		}
+	}()
+	return restored, nil
+}
+
+// SaveAdminSessions 导出供平滑重启保存管理员登录状态
+func SaveAdminSessions() error {
+	return adminStore.saveToDB()
+}
+
+// RestoreAdminSessions 导出供启动时恢复管理员登录状态
+func RestoreAdminSessions() (int, error) {
+	return adminStore.restoreFromDB()
+}
+
 
 // bcrypt 是 CPU 密集操作（DefaultCost 约 50~100ms），无限制地并发执行会被
 // 登录接口打满 CPU。信号量把同时进行的哈希/比对限制在核数以内。
@@ -334,6 +420,13 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/setup", SecureHeaders(handleInitialSetup))
 	mux.HandleFunc("POST /api/admin/preview-login", SecureHeaders(authMiddleware(handlePreviewLogin)))
 	mux.HandleFunc("POST /api/admin/password", SecureHeaders(authMiddleware(handleChangePassword)))
+
+	// 版本信息与无感热更管理端点
+	mux.HandleFunc("GET /api/version", HandleVersion)
+	mux.HandleFunc("GET /api/admin/version", SecureHeaders(authMiddleware(handleAdminVersion)))
+	mux.HandleFunc("GET /api/admin/update/check", SecureHeaders(authMiddleware(handleCheckUpdate)))
+	mux.HandleFunc("POST /api/admin/update/restart", SecureHeaders(authMiddleware(handleSeamlessRestart)))
+	mux.HandleFunc("POST /api/admin/update/apply", SecureHeaders(authMiddleware(handleApplyUpdate)))
 }
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +523,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 			"sys_mb":        math.Round(float64(ms.Sys)/(1<<20)*10) / 10,
 			"go_version":    runtime.Version(),
 		},
+		"version": version.Get(),
 	})
 }
 

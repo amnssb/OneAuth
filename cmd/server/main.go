@@ -26,10 +26,19 @@ import (
 	"oneauth/internal/oidc"
 	"oneauth/internal/onebot"
 	"oneauth/internal/session"
+	"oneauth/internal/version"
 	"oneauth/web"
 )
 
 func main() {
+	// 支持命令行参数快速查看版本号
+	for _, arg := range os.Args[1:] {
+		if arg == "-v" || arg == "--version" || arg == "-version" || arg == "version" {
+			fmt.Println(version.Full())
+			return
+		}
+	}
+
 	port := getEnv("PORT", "9000")
 	dbPath := getEnv("DB_PATH", "oneauth.db")
 	keyPath := getEnv("KEY_PATH", "oneauth_rsa.pem")
@@ -37,6 +46,10 @@ func main() {
 	if _, err := database.InitDB(dbPath); err != nil {
 		log.Fatalf("[启动失败] 数据库初始化异常: %v", err)
 	}
+
+	// 跨版本更新 / 重启无感接力：从 SQLite 恢复未过期业务会话与管理令牌
+	_, _ = session.DefaultManager.RestoreStateFromDB()
+	_, _ = admin.RestoreAdminSessions()
 
 	oidc.InitKeys(keyPath)
 
@@ -108,6 +121,7 @@ func main() {
 			"BackgroundURL": background,
 			"CustomCSS":     template.CSS(customCSS),
 			"TTL":           ttl,
+			"Version":       version.Version,
 			// 登录页当前仅 QQ 一条核销通道；多平台接入后这里按会话可用的
 			// 通道动态展示各平台说明。
 			"PlatformLabel": identity.Label(identity.ProviderQQ),
@@ -139,7 +153,7 @@ func main() {
 	mux.HandleFunc("GET /demo", demoGuard(handleDemoPage))
 	mux.HandleFunc("GET /demo/callback", demoGuard(handleDemoCallback))
 
-	log.Printf("🚀 OneAuth 已启动 → http://0.0.0.0:%s\n", port)
+	log.Printf("🚀 OneAuth %s (%s) 已启动 → http://0.0.0.0:%s\n", version.Version, version.GitCommit, port)
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
 	log.Printf("🔗 OIDC 发现（多 Issuer）→ http://localhost:%s/{issuer_slug}/.well-known/openid-configuration\n", port)
 	log.Printf("🤖 OneBot WS → ws://localhost:%s/ws/onebot\n", port)
@@ -154,12 +168,17 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	// 优雅停机：等待在途请求（含 SSE 等待核销的长连接）最多 10s
+	// 注册平滑重启关闭钩子
+	admin.ShutdownServer = srv.Shutdown
+
+	// 优雅停机：等待在途请求（含 SSE 等待核销的长连接）最多 10s，退出前保存瞬态会话实现无感更新
 	go func() {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 		<-stop
-		log.Println("🛑 收到退出信号，正在优雅停机...")
+		log.Println("🛑 收到退出信号，正在保存瞬态会话并优雅停机...")
+		_ = session.DefaultManager.SaveStateToDB()
+		_ = admin.SaveAdminSessions()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -308,11 +327,15 @@ func handleHomePage(w http.ResponseWriter, r *http.Request) {
         <p>基于 OIDC 协议的统一身份认证服务，为接入的业务系统提供群验证码单点登录能力。</p>
         {{.DemoBlock}}
         <a class="btn-secondary" href="/admin">⚙️ 进入管理员控制台</a>
+        <div style="margin-top:22px; font-size:0.78rem; color:#64748b;">
+            OneAuth {{.Version}} · 开源轻量级身份认证网关
+        </div>
     </div>
 </body>
 </html>`
 	html = strings.Replace(html, "{{.SiteName}}", template.HTMLEscapeString(siteName), -1)
 	html = strings.Replace(html, "{{.DemoBlock}}", demoBlock, 1)
+	html = strings.Replace(html, "{{.Version}}", template.HTMLEscapeString(version.Version), -1)
 	_, _ = w.Write([]byte(html))
 }
 

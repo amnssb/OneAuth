@@ -739,6 +739,8 @@
             .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--ai-border); padding: 18px 20px; }
             .main-content { padding: 20px; }
         }
+
+        @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -889,6 +891,20 @@
         </div>
     </div>
 
+    <!-- 无感平滑重启状态遮罩 -->
+    <div class="modal-overlay hidden" id="restartModal">
+        <div class="modal-box" style="text-align:center; padding:36px 30px;">
+            <div style="font-size:2.8rem; margin-bottom:16px; display:inline-block; animation:spin 2s linear infinite;" id="restartIcon">🔄</div>
+            <h3 style="font-size:1.3rem; font-weight:700; color:var(--ai-text); margin-bottom:10px;" id="restartTitle">正在执行无感平滑热重载</h3>
+            <p class="modal-desc" style="margin-bottom:20px;" id="restartSubtitle">
+                业务会话已备份至持久化层，服务正在平滑重载，会话保持无损，请稍候…
+            </p>
+            <div style="display:inline-block; font-size:0.82rem; color:var(--ai-text-secondary); background:var(--ai-surface-container); padding:6px 16px; border-radius:9999px;" id="restartTimer">
+                正在等待服务就绪…
+            </div>
+        </div>
+    </div>
+
     <!-- 主控台外壳 -->
     <div class="app-shell hidden" id="appShell">
         <aside class="sidebar">
@@ -896,7 +912,7 @@
                 <a class="sidebar-brand" href="/">
                     <div class="brand-logo-icon">✦</div>
                     <div class="brand-text">
-                        <h1>OneAuth <span class="brand-badge">PRO</span></h1>
+                        <h1>OneAuth <span class="brand-badge" id="versionBadge">v1.1.0</span></h1>
                         <div class="brand-subtitle">QQ OIDC Identity Hub</div>
                     </div>
                 </a>
@@ -1122,6 +1138,57 @@
                     <div style="display:flex; justify-content:flex-end;">
                         <button class="btn btn-primary" onclick="withBusy(this, () => saveSettings('demo'))">
                             <span>💾 保存 Demo 设置</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 系统版本与无感热更管理 -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title-box">
+                            <span class="card-icon">🚀</span>
+                            <div>
+                                <div class="card-title">系统版本与无感更新</div>
+                                <div class="card-desc">监控版本信息、在线检查最新发行版并执行零停机平滑热重载（会话保持无损）。</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stats-grid" style="margin-bottom: 20px;">
+                        <div class="stat-card">
+                            <div class="stat-icon">🏷️</div>
+                            <div class="stat-val" id="verCurrentVal">v1.1.0</div>
+                            <div class="stat-label">当前运行版本</div>
+                            <div class="stat-hint" id="verCommitHint">commit: dev</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon">💻</div>
+                            <div class="stat-val" id="verGoVal">—</div>
+                            <div class="stat-label">运行时环境</div>
+                            <div class="stat-hint" id="verPlatformHint">OS / Arch</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon">🔄</div>
+                            <div class="stat-val" id="verStatusVal">最新版本</div>
+                            <div class="stat-label">更新状态</div>
+                            <div class="stat-hint" id="verStatusHint">点击下方按钮检查</div>
+                        </div>
+                    </div>
+
+                    <div id="updateReleaseBox" class="hidden" style="background:var(--ai-surface-container); border-radius:12px; padding:16px; margin-bottom:20px; border-left:4px solid var(--ai-success);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <strong style="color:var(--ai-text); font-size:1.05rem;" id="releaseName">发现新版本</strong>
+                            <span style="font-size:0.8rem; color:var(--ai-text-secondary);" id="releaseDate"></span>
+                        </div>
+                        <div id="releaseNotes" style="font-size:0.85rem; color:var(--ai-text-secondary); white-space:pre-wrap; max-height:120px; overflow-y:auto; margin-bottom:12px; font-family:ui-monospace,monospace;"></div>
+                        <a id="releaseLink" href="#" target="_blank" class="btn btn-secondary" style="display:inline-flex; font-size:0.85rem; padding:6px 14px; text-decoration:none;">📦 查看 GitHub Release</a>
+                    </div>
+
+                    <div style="display:flex; gap:12px; justify-content:flex-end; flex-wrap:wrap;">
+                        <button class="btn btn-secondary" onclick="withBusy(this, checkAppUpdate)">
+                            <span>🔍 检查新版本</span>
+                        </button>
+                        <button class="btn btn-primary" onclick="confirmSeamlessRestart()">
+                            <span>⚡ 平滑无感重启 (保持会话无损)</span>
                         </button>
                     </div>
                 </div>
@@ -1634,20 +1701,45 @@
         document.getElementById('secretModal').classList.add('hidden');
     }
 
-    async function copyText(elementId, button) {
-        const text = document.getElementById(elementId).textContent;
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch (e) {
-            // Clipboard permission refused or unavailable: fall back to
-            // selecting the value so Ctrl+C still works.
-            const range = document.createRange();
-            range.selectNodeContents(document.getElementById(elementId));
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
+    // 全平台高兼容剪贴板写入器
+    async function copyTextToClipboard(text) {
+        if (!text) return false;
+        text = String(text).trim();
+        if (navigator.clipboard && window.isSecureContext) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (e) {
+                console.warn("navigator.clipboard failed:", e);
+            }
         }
-        if (button) {
+        try {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.top = "0";
+            textArea.style.left = "-9999px";
+            textArea.style.opacity = "0";
+            textArea.setAttribute("readonly", "");
+            document.body.appendChild(textArea);
+            textArea.select();
+            const ok = document.execCommand("copy");
+            document.body.removeChild(textArea);
+            if (ok) return true;
+        } catch (e) {}
+        try {
+            window.prompt("请复制以下内容：", text);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async function copyText(elementId, button) {
+        const el = document.getElementById(elementId);
+        const text = el ? el.textContent : "";
+        const ok = await copyTextToClipboard(text);
+        if (button && ok) {
             const original = button.textContent;
             button.textContent = '已复制';
             setTimeout(() => { button.textContent = original; }, 1500);
@@ -1817,10 +1909,99 @@
                 stateBadge.innerText = online ? 'ONLINE' : 'OFFLINE';
                 stateBadge.style.color = online ? 'var(--ai-success)' : 'var(--ai-danger)';
             }
+
+            if (s.version) {
+                const v = s.version;
+                if ($('versionBadge')) $('versionBadge').innerText = v.version;
+                if ($('verCurrentVal')) $('verCurrentVal').innerText = v.version;
+                if ($('verCommitHint')) $('verCommitHint').innerText = 'commit: ' + (v.git_commit || 'dev');
+                if ($('verGoVal')) $('verGoVal').innerText = v.go_version || '—';
+                if ($('verPlatformHint')) $('verPlatformHint').innerText = (v.os || '') + ' / ' + (v.arch || '');
+            }
         } catch (e) {
             // 401 已在 apiFetch 内强制登出；其余轮询失败静默，避免错误刷屏
             console.warn('[stats]', e.message);
         }
+    }
+
+    // 检查服务端更新
+    async function checkAppUpdate() {
+        try {
+            $('verStatusVal').innerText = '检查中…';
+            $('verStatusVal').style.color = 'var(--ai-text)';
+            const data = await apiFetch('/api/admin/update/check');
+            if (data.has_update) {
+                $('verStatusVal').innerText = '发现新版本';
+                $('verStatusVal').style.color = 'var(--ai-success)';
+                $('verStatusHint').innerText = '最新版本: ' + data.latest_version;
+                $('updateReleaseBox').classList.remove('hidden');
+                $('releaseName').innerText = (data.release_name || data.latest_version) + ' 现已发布';
+                $('releaseDate').innerText = data.published_at ? new Date(data.published_at).toLocaleDateString() : '';
+                $('releaseNotes').innerText = data.release_notes || '暂无详细更新说明';
+                $('releaseLink').href = data.release_url || '#';
+                showToast('发现新版本: ' + data.latest_version, 'success');
+            } else {
+                $('verStatusVal').innerText = '已是最新版';
+                $('verStatusVal').style.color = 'var(--ai-text)';
+                $('verStatusHint').innerText = data.error ? data.error : '当前已是最新发布版本';
+                $('updateReleaseBox').classList.add('hidden');
+                showToast(data.error ? data.error : '当前已是最新版本', data.error ? 'error' : 'success');
+            }
+        } catch (e) {
+            $('verStatusVal').innerText = '检查失败';
+            $('verStatusVal').style.color = 'var(--ai-danger)';
+            $('verStatusHint').innerText = e.message;
+            showToast('检查更新失败: ' + e.message, 'error');
+        }
+    }
+
+    // 平滑热重载（无感更新）
+    function confirmSeamlessRestart() {
+        confirmAction('平滑无感重启', '服务将在后台保存所有瞬态业务会话并安全重启，整个过程约 1 秒，会话零中断，当前登录态不会失效。确定执行吗？', async () => {
+            const modal = $('restartModal');
+            if (modal) modal.classList.remove('hidden');
+            $('restartTitle').innerText = '正在执行无感平滑热重载…';
+            $('restartSubtitle').innerText = '业务会话已备份至持久化层，服务正在平滑重载，请稍候…';
+            $('restartTimer').innerText = '已向后端发送热重载指令…';
+
+            try {
+                await apiFetch('/api/admin/update/restart', { method: 'POST' });
+            } catch (e) {
+                // 服务端重启可能瞬时断开 HTTP 连接，静默捕获
+            }
+
+            let attempts = 0;
+            const maxAttempts = 30;
+            const pollRestart = setInterval(async () => {
+                attempts++;
+                $('restartTimer').innerText = `正在检测新服务就绪… (${attempts}s)`;
+                try {
+                    const res = await fetch('/api/version');
+                    if (res.ok) {
+                        clearInterval(pollRestart);
+                        $('restartTitle').innerText = '✅ 服务平滑重载成功！';
+                        $('restartSubtitle').innerText = '新实例已无缝接管，业务会话与管理登录态完整保持无损。';
+                        $('restartIcon').innerText = '🎉';
+                        $('restartIcon').style.animation = 'none';
+                        setTimeout(() => {
+                            if (modal) modal.classList.add('hidden');
+                            $('restartIcon').innerText = '🔄';
+                            $('restartIcon').style.animation = 'spin 2s linear infinite';
+                            refreshStats();
+                            showToast('服务已平滑重载完成', 'success');
+                        }, 1200);
+                    }
+                } catch (err) {
+                    // 等待拉起
+                }
+                if (attempts >= maxAttempts) {
+                    clearInterval(pollRestart);
+                    $('restartTitle').innerText = '⚠️ 重启响应超时';
+                    $('restartSubtitle').innerText = '未能在预期时间内收到服务响应，请检查服务端日志。';
+                    $('restartTimer').innerText = '请刷新页面查看服务状态';
+                }
+            }, 500);
+        });
     }
 
     // 两次轮询之间按本地时钟平滑插值运行时间，避免秒数 5 秒一跳。

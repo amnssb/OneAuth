@@ -267,3 +267,42 @@ func TestAuthorizeResolvesClientGroup(t *testing.T) {
 		t.Fatalf("empty per-client group must fall back to global, got %q", g)
 	}
 }
+
+func TestSessionStatusEndpoint(t *testing.T) {
+	sess, err := session.DefaultManager.CreateSession("test_cli", "http://cb.local/cb", "st", "", "8888", 60)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// 1. Pending 状态
+	req := httptest.NewRequest(http.MethodGet, "/api/session/status?session_id="+sess.SessionID, nil)
+	rec := httptest.NewRecorder()
+	handleSessionStatus(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if res["status"] != "pending" {
+		t.Fatalf("expected pending, got %v", res["status"])
+	}
+
+	// 2. Verified 状态
+	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "10001", "8888"); !ok {
+		t.Fatal("verify failed")
+	}
+	rec = httptest.NewRecorder()
+	handleSessionStatus(rec, req)
+	var res2 map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res2); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if res2["status"] != "verified" {
+		t.Fatalf("expected verified, got %v", res2["status"])
+	}
+	if !strings.Contains(res2["redirect"].(string), sess.SessionID) {
+		t.Fatalf("unexpected redirect: %v", res2["redirect"])
+	}
+}

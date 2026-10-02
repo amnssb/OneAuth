@@ -22,3 +22,4 @@ oneauth-linux-arm64
 *.log
 .DS_Store
 Thumbs.db
+.omo/

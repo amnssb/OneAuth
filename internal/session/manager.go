@@ -4,9 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"oneauth/internal/database"
 )
 
 type SessionStatus string
@@ -280,4 +283,119 @@ func (m *Manager) startCleaner() {
 		}
 		m.mu.Unlock()
 	}
+}
+
+// SaveStateToDB 将内存中当前活跃且未过期的会话快照持久化到数据库，
+// 供版本更新或平滑热重启后恢复，实现业务会话零丢失（无感热更）。
+func (m *Manager) SaveStateToDB() error {
+	if database.WriteDB == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	tx, err := database.WriteDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM transient_sessions_backup"); err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO transient_sessions_backup 
+		(session_id, client_id, redirect_uri, state, code_challenge, verify_code, group_id, provider, user_id, auth_code, status, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	count := 0
+	for _, sess := range m.sessions {
+		if now.Before(sess.ExpiresAt) {
+			_, err := stmt.Exec(
+				sess.SessionID, sess.ClientID, sess.RedirectURI, sess.State,
+				sess.CodeChallenge, sess.VerifyCode, sess.GroupID,
+				sess.Provider, sess.UserID, sess.AuthCode,
+				string(sess.Status), sess.ExpiresAt,
+			)
+			if err != nil {
+				log.Printf("[无感更新] 会话备份写入异常: %v", err)
+				continue
+			}
+			count++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("[无感更新] 已持久化 %d 条活跃会话用于平滑重启恢复", count)
+	return nil
+}
+
+// RestoreStateFromDB 在系统启动时从数据库恢复未过期的瞬态会话，实现跨更新会话无感接力。
+func (m *Manager) RestoreStateFromDB() (int, error) {
+	if database.DB == nil {
+		return 0, nil
+	}
+	rows, err := database.DB.Query(`
+		SELECT session_id, client_id, redirect_uri, state, code_challenge, verify_code, 
+		       group_id, provider, user_id, auth_code, status, expires_at
+		FROM transient_sessions_backup
+		WHERE expires_at > CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	restored := 0
+	for rows.Next() {
+		var s AuthSession
+		var statusStr string
+		var expiresAt time.Time
+		if err := rows.Scan(
+			&s.SessionID, &s.ClientID, &s.RedirectURI, &s.State,
+			&s.CodeChallenge, &s.VerifyCode, &s.GroupID,
+			&s.Provider, &s.UserID, &s.AuthCode,
+			&statusStr, &expiresAt,
+		); err != nil {
+			continue
+		}
+
+		s.Status = SessionStatus(statusStr)
+		s.ExpiresAt = expiresAt
+		s.NotifyChan = make(chan struct{})
+		if s.Status == StatusVerified {
+			close(s.NotifyChan)
+		}
+
+		m.sessions[s.SessionID] = &s
+		if s.VerifyCode != "" && s.Status == StatusPending {
+			m.codeIndex[s.VerifyCode] = &s
+		}
+		if s.AuthCode != "" && s.Status == StatusConsumed {
+			m.authCodeIndex[s.AuthCode] = &s
+		}
+		restored++
+	}
+
+	if restored > 0 {
+		log.Printf("[无感更新] 已从备份成功恢复 %d 条活跃会话状态", restored)
+	}
+	go func() {
+		if database.WriteDB != nil {
+			_, _ = database.WriteDB.Exec("DELETE FROM transient_sessions_backup WHERE expires_at <= CURRENT_TIMESTAMP")
+		}
+	}()
+	return restored, nil
 }

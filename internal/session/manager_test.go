@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"oneauth/internal/database"
 )
 
 // 并发创建会话：验证码必须全局唯一，且 -race 下无数据竞争。
@@ -174,5 +176,65 @@ func TestNotifyChanClosedOnVerify(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("NotifyChan was not closed on verify")
+	}
+}
+
+// 跨重启/无感更新：会话保存至数据库并恢复测试
+func TestSaveAndRestoreStateDB(t *testing.T) {
+	db, err := database.InitDB(t.TempDir() + "/session_test.db")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer db.Close()
+	defer database.WriteDB.Close()
+
+	m1 := NewManager()
+	s1, err := m1.CreateSession("client1", "http://localhost/cb1", "state1", "challenge1", "8888", 60)
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	// 核销 s1
+	if _, ok := m1.VerifyCode("qq", s1.VerifyCode, "10001", "8888"); !ok {
+		t.Fatalf("VerifyCode failed")
+	}
+
+	// 创建未核销的 s2
+	s2, err := m1.CreateSession("client2", "http://localhost/cb2", "state2", "challenge2", "8888", 60)
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	// 保存状态到数据库
+	if err := m1.SaveStateToDB(); err != nil {
+		t.Fatalf("SaveStateToDB failed: %v", err)
+	}
+
+	// 模拟新进程启动恢复会话
+	m2 := NewManager()
+	count, err := m2.RestoreStateFromDB()
+	if err != nil {
+		t.Fatalf("RestoreStateFromDB failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 restored sessions, got %d", count)
+	}
+
+	// 验证 s1 恢复后为 Verified 状态
+	restored1, exists := m2.GetSession(s1.SessionID)
+	if !exists {
+		t.Fatalf("s1 not found after restore")
+	}
+	if restored1.Status != StatusVerified {
+		t.Fatalf("expected s1 status VERIFIED, got %s", restored1.Status)
+	}
+
+	// 验证 s2 恢复后可以通过 codeIndex 正常核销（用户无感）
+	verified2, ok := m2.VerifyCode("qq", s2.VerifyCode, "10002", "8888")
+	if !ok {
+		t.Fatalf("failed to verify s2 after restore")
+	}
+	if verified2.UserID != "10002" {
+		t.Fatalf("expected user 10002, got %s", verified2.UserID)
 	}
 }

@@ -2,17 +2,22 @@ package onebot
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"oneauth/internal/database"
 	"oneauth/internal/identity"
 	"oneauth/internal/session"
+	"oneauth/internal/version"
 
 	"github.com/gorilla/websocket"
 )
@@ -35,6 +40,186 @@ const (
 	// 此时丢弃新事件（验证码消息可由用户重发）而不是无界堆积内存。
 	eventQueueLen = 256
 )
+
+// Sender 定义 OneBot 群消息回发接口
+type Sender interface {
+	SendGroupMsg(groupID, text string) error
+}
+
+type wsClient struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+	isV12   atomic.Bool
+}
+
+func newWSClient(conn *websocket.Conn) *wsClient {
+	return &wsClient{conn: conn}
+}
+
+func (c *wsClient) SendGroupMsg(groupID, text string) error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if c.isV12.Load() {
+		payload := map[string]any{
+			"action": "send_message",
+			"params": map[string]any{
+				"detail_type": "group",
+				"group_id":    groupID,
+				"message": []map[string]any{
+					{"type": "text", "data": map[string]any{"text": text}},
+				},
+			},
+		}
+		return c.conn.WriteJSON(payload)
+	}
+
+	var gid any = groupID
+	if n, err := strconv.ParseInt(groupID, 10, 64); err == nil {
+		gid = n
+	}
+	payload := map[string]any{
+		"action": "send_group_msg",
+		"params": map[string]any{
+			"group_id": gid,
+			"message":  text,
+		},
+	}
+	return c.conn.WriteJSON(payload)
+}
+
+var (
+	clientsMu     sync.RWMutex
+	activeClients []*wsClient
+	startTime     = time.Now()
+
+	cooldownMu    sync.Mutex
+	groupCooldown = make(map[string]time.Time)
+)
+
+func registerClient(c *wsClient) {
+	clientsMu.Lock()
+	activeClients = append(activeClients, c)
+	clientsMu.Unlock()
+}
+
+func unregisterClient(c *wsClient) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	for i, item := range activeClients {
+		if item == c {
+			activeClients = append(activeClients[:i], activeClients[i+1:]...)
+			break
+		}
+	}
+}
+
+func getActiveSender() Sender {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	if len(activeClients) > 0 {
+		return activeClients[len(activeClients)-1]
+	}
+	return nil
+}
+
+func checkGroupCooldown(groupID string, cd time.Duration) bool {
+	cooldownMu.Lock()
+	defer cooldownMu.Unlock()
+	now := time.Now()
+	if last, exists := groupCooldown[groupID]; exists && now.Sub(last) < cd {
+		return false
+	}
+	groupCooldown[groupID] = now
+	return true
+}
+
+func formatUptime(d time.Duration) string {
+	sec := int64(d.Seconds())
+	if sec < 0 {
+		sec = 0
+	}
+	days := sec / 86400
+	hours := (sec % 86400) / 3600
+	mins := (sec % 3600) / 60
+	secs := sec % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%d天 %d小时 %d分", days, hours, mins)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%d小时 %d分 %d秒", hours, mins, secs)
+	}
+	if mins > 0 {
+		return fmt.Sprintf("%d分 %d秒", mins, secs)
+	}
+	return fmt.Sprintf("%d秒", secs)
+}
+
+// BuildStatusReport 组装 #oidc 指令回复的运行监控简报
+func BuildStatusReport() string {
+	uptimeStr := formatUptime(time.Since(startTime))
+	verInfo := version.Get()
+	stats := session.DefaultManager.Stats()
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	heapMB := math.Round(float64(ms.HeapAlloc)/(1<<20)*10) / 10
+	goroutines := runtime.NumGoroutine()
+	conns := botConns.Load()
+
+	rateStr := "100.00% (初始)"
+	statusEmoji := "🟢 稳定运行 (STABLE)"
+	if stats.CreatedTotal > 0 {
+		rate := float64(stats.VerifiedTotal) / float64(stats.CreatedTotal) * 100
+		if rate > 100 {
+			rate = 100
+		}
+		rateStr = fmt.Sprintf("%.2f%%", rate)
+		if rate < 60 && stats.CreatedTotal > 5 {
+			statusEmoji = "🟡 出现波动 (WARNING)"
+		}
+	}
+
+	return fmt.Sprintf(`✦ OneAuth 运行监控简报 ✦
+───────────────────────
+⏱️ 运行时间：%s
+🏷️ 系统版本：OneAuth %s (%s/%s)
+⚡ 服务状态：%s
+
+📊 鉴权统计：
+  • 授权请求总数：%d 次
+  • 验证码核销量：%d 次
+  • 实时待核销数：%d 个
+  • 鉴权核销成功率：%s
+
+🤖 节点通信：
+  • 反向 WS 状态：在线 (%d 个节点)
+  • 协议内核：OneBot v11 / v12
+
+💻 系统健康：
+  • 运行时协程：%d
+  • 内存占用：%.1f MB
+  • 数据存储：SQLite WAL
+───────────────────────
+OneAuth QQ-OIDC 统一身份核验`,
+		uptimeStr,
+		verInfo.Version,
+		verInfo.OS,
+		verInfo.Arch,
+		statusEmoji,
+		stats.CreatedTotal,
+		stats.VerifiedTotal,
+		stats.Pending,
+		rateStr,
+		conns,
+		goroutines,
+		heapMB,
+	)
+}
 
 // 连接状态原子量：供管理后台概览轮询 OneBot 反向 WS 的实时接入情况，
 // 读写都不需要加锁（事件处理在独立 goroutine，连接生命周期在 handler）。
@@ -89,7 +274,10 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	botConns.Add(1)
 	botLastConnect.Store(now)
+	client := newWSClient(conn)
+	registerClient(client)
 	defer func() {
+		unregisterClient(client)
 		botConns.Add(-1)
 		botLastDisconnect.Store(time.Now().Unix())
 	}()
@@ -103,7 +291,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// 单消费者按序处理：群消息事件之间保持到达顺序，
 		// 同时把"每事件一个 goroutine"的无界并发改为固定 1 + 缓冲队列。
 		for msg := range events {
-			processEvent(msg)
+			processEvent(msg, client)
 		}
 	}()
 
@@ -123,7 +311,14 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func processEvent(raw []byte) {
+func processEvent(raw []byte, optionalSender ...Sender) {
+	var sender Sender
+	if len(optionalSender) > 0 && optionalSender[0] != nil {
+		sender = optionalSender[0]
+	} else {
+		sender = getActiveSender()
+	}
+
 	botLastEvent.Store(time.Now().Unix())
 
 	var event map[string]interface{}
@@ -171,6 +366,9 @@ func processEvent(raw []byte) {
 	// Detect v12
 	if typeVal, ok := event["type"].(string); ok && typeVal == "message" {
 		if detailType, ok := event["detail_type"].(string); ok && detailType == "group" {
+			if c, ok := sender.(*wsClient); ok {
+				c.isV12.Store(true)
+			}
 			if gID, ok := event["group_id"].(string); ok {
 				groupID = gID
 			}
@@ -193,6 +391,25 @@ func processEvent(raw []byte) {
 		origin = "self/admin"
 	}
 	log.Printf("[OneBot] Received group message: '%s' from user: '%s' group: '%s' (%s)", loggable(text), userID, groupID, origin)
+
+	// 指令匹配：#oidc 运行监控报告
+	if text == "#OIDC" || strings.HasPrefix(text, "#OIDC ") {
+		if database.GetSetting("bot_status_cmd_enabled", "true") != "false" {
+			if checkGroupCooldown(groupID, 5*time.Second) {
+				report := BuildStatusReport()
+				if sender != nil {
+					if err := sender.SendGroupMsg(groupID, report); err != nil {
+						log.Printf("[OneBot] 回复群 %s #oidc 监控状态失败: %v", groupID, err)
+					} else {
+						log.Printf("[OneBot] ✓ 成功响应群 %s 的 #oidc 监控指令", groupID)
+					}
+				}
+			} else {
+				log.Printf("[OneBot] 群 %s 触发 #oidc 过于频繁，已冷却抑制", groupID)
+			}
+		}
+		return
+	}
 
 	if codeRegex.MatchString(text) {
 		sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, text, userID, groupID)

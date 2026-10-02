@@ -101,6 +101,7 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// 会话相关端点（与 issuer 无关，登录页/SSE 共用）。
 	mux.HandleFunc("GET /api/session/stream", handleSSE)
+	mux.HandleFunc("GET /api/session/status", handleSessionStatus)
 	mux.HandleFunc("GET /api/session/callback", handleSessionCallback)
 }
 
@@ -502,6 +503,31 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleSessionStatus 供登录页在 SSE 断开重连或不支持 SSE 的环境中轮询会话状态，保证无感更新不中断
+func handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	sess, exists := session.DefaultManager.GetSession(sessionID)
+	if !exists {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_found"})
+		return
+	}
+	if time.Now().After(sess.ExpiresAt) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "expired"})
+		return
+	}
+	if sess.Status == session.StatusVerified {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "verified",
+			"redirect": fmt.Sprintf("/api/session/callback?session_id=%s", sessionID),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "pending",
+		"ttl":    int(time.Until(sess.ExpiresAt).Seconds()),
+	})
 }
 
 func handleSessionCallback(w http.ResponseWriter, r *http.Request) {

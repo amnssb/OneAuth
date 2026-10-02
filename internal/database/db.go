@@ -103,6 +103,26 @@ func migrate() error {
 			retired_at DATETIME,
 			PRIMARY KEY (slug, kid)
 		);`,
+		`CREATE TABLE IF NOT EXISTS transient_sessions_backup (
+			session_id TEXT PRIMARY KEY,
+			client_id TEXT NOT NULL,
+			redirect_uri TEXT NOT NULL,
+			state TEXT,
+			code_challenge TEXT,
+			verify_code TEXT,
+			group_id TEXT,
+			provider TEXT,
+			user_id TEXT,
+			auth_code TEXT,
+			status TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS transient_admin_sessions (
+			token TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			issued_at INTEGER NOT NULL,
+			exp INTEGER NOT NULL
+		);`,
 		`INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES
 			('site_name', '统一身份认证中心'),
 			('site_logo', ''),
@@ -111,7 +131,9 @@ func migrate() error {
 			('target_group_id', '87654321'),
 			('onebot_token', 'oneauth_secure_secret_token'),
 			('code_ttl', '180'),
-			('demo_enabled', 'true');`,
+			('demo_enabled', 'true'),
+			('update_check_url', 'https://api.github.com/repos/amnssb/OneAuth/releases/latest'),
+			('bot_status_cmd_enabled', 'true');`,
 	}
 
 	for _, q := range queries {

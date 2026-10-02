@@ -215,6 +215,8 @@
             border-radius: 9999px;
             font-size: 0.9rem;
             cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
             transition: background 0.2s;
         }
         .group-pill:hover {
@@ -231,6 +233,10 @@
             cursor: pointer;
             position: relative;
             overflow: hidden;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
             transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s;
         }
         .code-display:hover {
@@ -238,7 +244,11 @@
             box-shadow: var(--ai-shadow-md);
         }
         .code-display:active {
-            transform: scale(0.99);
+            transform: scale(0.98);
+        }
+        .code-display.copied-highlight {
+            box-shadow: 0 0 0 3px var(--ai-success), var(--ai-shadow-md);
+            transform: scale(1.02);
         }
         .code-label-bar {
             display: flex;
@@ -499,56 +509,184 @@
 
         const copyHintDefault = document.getElementById('copyHint').innerHTML;
 
-        function copyCode() {
-            const code = document.getElementById('verifyCode').innerText.trim();
-            navigator.clipboard.writeText(code).then(() => {
-                const hint = document.getElementById('copyHint');
-                hint.innerHTML = '<span>✓ 已复制验证码到剪贴板！</span>';
-                setTimeout(() => {
-                    hint.innerHTML = copyHintDefault;
-                }, 2000);
-            }).catch(err => {
-                console.error("Failed to copy code: ", err);
-            });
-        }
+        // 全平台移动端/浏览器高兼容剪贴板写入器
+        async function copyTextToClipboard(text) {
+            if (!text) return false;
+            text = String(text).trim();
 
-        // A transient inline hint rather than an alert: the pill is inside a
-        // fixed-height card and dialogs steal focus from the code to copy.
-        function copyGroup(grp) {
-            navigator.clipboard.writeText(grp).then(() => {
-                const pill = document.querySelector('.group-pill');
-                const original = pill.innerHTML;
-                pill.innerHTML = '✓ 已复制群号';
-                setTimeout(() => { pill.innerHTML = original; }, 1500);
-            });
-        }
-
-        // SSE 监听连接
-        const sessionID = "{{.SessionID}}";
-        if (sessionID) {
-            const evtSource = new EventSource(`/api/session/stream?session_id=${sessionID}`);
-
-            evtSource.onmessage = function(event) {
+            // 1. 尝试现代 Clipboard API（仅在 HTTPS/localhost 等安全上下文且支持时生效）
+            if (navigator.clipboard && window.isSecureContext) {
                 try {
-                    const data = JSON.parse(event.data);
-                    if (data.status === 'verified') {
-                        clearInterval(timerInterval);
-                        showSuccess(data.redirect || data.redirect_uri);
-                        evtSource.close();
-                    } else if (data.status === 'expired') {
-                        clearInterval(timerInterval);
-                        setExpired();
-                        evtSource.close();
-                    }
+                    await navigator.clipboard.writeText(text);
+                    return true;
                 } catch (e) {
-                    console.error("Parse SSE data error:", e);
+                    console.warn("navigator.clipboard failed, attempting fallback:", e);
                 }
-            };
+            }
 
-            evtSource.onerror = function() {
-                console.error("SSE connection error");
-            };
+            // 2. 移动端/WebView/HTTP 兼容回退方案：textarea + execCommand
+            try {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed";
+                textArea.style.top = "0";
+                textArea.style.left = "-9999px";
+                textArea.style.width = "2em";
+                textArea.style.height = "2em";
+                textArea.style.padding = "0";
+                textArea.style.border = "none";
+                textArea.style.outline = "none";
+                textArea.style.boxShadow = "none";
+                textArea.style.background = "transparent";
+                textArea.style.opacity = "0";
+                textArea.style.fontSize = "16px"; // 防止 iOS 聚焦时强制缩放页面
+                textArea.setAttribute("readonly", "");
+                document.body.appendChild(textArea);
+
+                if (navigator.userAgent.match(/ipad|ipod|iphone/i)) {
+                    const range = document.createRange();
+                    range.selectNodeContents(textArea);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    textArea.setSelectionRange(0, 999999);
+                } else {
+                    textArea.focus();
+                    textArea.select();
+                }
+
+                const successful = document.execCommand("copy");
+                document.body.removeChild(textArea);
+                if (successful) return true;
+            } catch (err) {
+                console.warn("execCommand copy error:", err);
+            }
+
+            // 3. 终极兜底：弹窗引导手动复制
+            try {
+                window.prompt("请长按下方输入框复制内容：", text);
+                return true;
+            } catch (e) {
+                return false;
+            }
         }
+
+        let copyDebounce = false;
+        async function copyCode(e) {
+            if (e) e.stopPropagation();
+            if (copyDebounce) return;
+            copyDebounce = true;
+            setTimeout(() => { copyDebounce = false; }, 350);
+
+            const codeEl = document.getElementById('verifyCode');
+            const code = codeEl ? codeEl.innerText.trim() : "";
+            const hint = document.getElementById('copyHint');
+            const cd = document.querySelector('.code-display');
+
+            const ok = await copyTextToClipboard(code);
+            if (ok) {
+                if (navigator.vibrate) {
+                    try { navigator.vibrate(35); } catch(ex) {}
+                }
+                if (cd) {
+                    cd.classList.add('copied-highlight');
+                    setTimeout(() => cd.classList.remove('copied-highlight'), 800);
+                }
+                if (hint) {
+                    hint.innerHTML = '<span style="color:var(--ai-success);font-weight:700;">✓ 已复制验证码到剪贴板！</span>';
+                    setTimeout(() => {
+                        hint.innerHTML = copyHintDefault;
+                    }, 2200);
+                }
+            }
+        }
+
+        // 群号复制
+        async function copyGroup(grp) {
+            const ok = await copyTextToClipboard(grp);
+            if (ok) {
+                if (navigator.vibrate) {
+                    try { navigator.vibrate(25); } catch(ex) {}
+                }
+                const pill = document.querySelector('.group-pill');
+                if (pill) {
+                    const original = pill.innerHTML;
+                    pill.innerHTML = '✓ 已复制群号';
+                    setTimeout(() => { pill.innerHTML = original; }, 1500);
+                }
+            }
+        }
+
+        // SSE 监听连接 + 自动轮询容灾（保证服务无感热更新时不丢失会话）
+        const sessionID = "{{.SessionID}}";
+        let evtSource = null;
+        let pollTimer = null;
+        let isDone = false;
+
+        function startSSE() {
+            if (!sessionID || isDone) return;
+            try {
+                evtSource = new EventSource(`/api/session/stream?session_id=${sessionID}`);
+
+                evtSource.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.status === 'verified') {
+                            isDone = true;
+                            clearInterval(timerInterval);
+                            if (pollTimer) clearInterval(pollTimer);
+                            showSuccess(data.redirect || data.redirect_uri);
+                            evtSource.close();
+                        } else if (data.status === 'expired') {
+                            isDone = true;
+                            clearInterval(timerInterval);
+                            if (pollTimer) clearInterval(pollTimer);
+                            setExpired();
+                            evtSource.close();
+                        }
+                    } catch (e) {
+                        console.error("Parse SSE data error:", e);
+                    }
+                };
+
+                evtSource.onerror = function() {
+                    // 服务端平滑热重启时连接会短暂停顿，立即启动轮询等待服务拉起
+                    if (!pollTimer && !isDone) {
+                        pollTimer = setInterval(pollSessionStatus, 1500);
+                    }
+                };
+            } catch (e) {
+                if (!pollTimer && !isDone) {
+                    pollTimer = setInterval(pollSessionStatus, 1500);
+                }
+            }
+        }
+
+        async function pollSessionStatus() {
+            if (!sessionID || isDone) return;
+            try {
+                const res = await fetch(`/api/session/status?session_id=${sessionID}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.status === 'verified') {
+                    isDone = true;
+                    clearInterval(timerInterval);
+                    if (pollTimer) clearInterval(pollTimer);
+                    if (evtSource) evtSource.close();
+                    showSuccess(data.redirect);
+                } else if (data.status === 'expired') {
+                    isDone = true;
+                    clearInterval(timerInterval);
+                    if (pollTimer) clearInterval(pollTimer);
+                    if (evtSource) evtSource.close();
+                    setExpired();
+                }
+            } catch (e) {
+                // 重启瞬间网络可能暂时拒绝，静默等待下一次重试
+            }
+        }
+
+        startSSE();
 
         function showSuccess(redirectUri) {
             const overlay = document.getElementById('successOverlay');
