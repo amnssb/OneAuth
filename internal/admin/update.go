@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,16 +90,34 @@ func compareVersions(v1, v2 string) int {
 
 // handleCheckUpdate 检查新版本：GET /api/admin/update/check
 func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
-	checkURL := database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest")
+	checkURL := strings.TrimSpace(database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"))
 	if checkURL == "" {
-		writeError(w, http.StatusBadRequest, "未配置更新检查地址")
-		return
+		checkURL = "https://api.github.com/repos/amnssb/OneAuth/releases/latest"
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 12 * time.Second,
+	}
+
+	proxySetting := strings.TrimSpace(database.GetSetting("update_proxy", ""))
+	if proxySetting != "" {
+		if proxyURL, err := url.Parse(proxySetting); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		} else {
+			log.Printf("[检查更新] 解析配置代理地址失败 (%s): %v", proxySetting, err)
+		}
+	}
+
+	client := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
+	}
+
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, checkURL, nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "创建检查请求失败")
+		writeError(w, http.StatusInternalServerError, "创建检查请求失败: "+err.Error())
 		return
 	}
 	req.Header.Set("User-Agent", "OneAuth-Server/"+version.Version)
@@ -106,17 +125,52 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// 网络不可达或离线环境，优雅降级
+		errStr := err.Error()
+		friendlyErr := "检查更新网络连接超时或离线"
+		if strings.Contains(errStr, "deadline exceeded") || strings.Contains(errStr, "Client.Timeout") || strings.Contains(errStr, "timeout") {
+			friendlyErr = "连接更新源超时（国内访问 GitHub 受限）。建议配置 HTTP/SOCKS5 代理或自定义镜像源"
+		} else if strings.Contains(errStr, "connectex") || strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no route to host") {
+			friendlyErr = "无法连通更新服务器（网络未连通或代理不可用）"
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
 			"has_update":      false,
 			"current_version": version.Version,
 			"latest_version":  version.Version,
-			"error":           "检查更新网络连接超时或离线: " + err.Error(),
+			"error":           friendlyErr + fmt.Sprintf(" (详情: %s)", errStr),
 			"checked_at":      time.Now().Format(time.RFC3339),
 		})
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// GitHub 仓库在未发 Release 之前，/releases/latest 会返回 404 Not Found
+		writeJSON(w, http.StatusOK, map[string]any{
+			"has_update":      false,
+			"current_version": version.Version,
+			"latest_version":  version.Version,
+			"message":         "官方仓库暂未发布正式 Release 发行版，当前运行已是主干最新版本",
+			"checked_at":      time.Now().Format(time.RFC3339),
+		})
+		return
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		errMsg := "GitHub API 请求被拒绝 (403)"
+		if strings.Contains(string(bodyBytes), "rate limit") || resp.Header.Get("X-Ratelimit-Remaining") == "0" {
+			errMsg = "GitHub API 匿名访问频次已超限 (60次/小时)，请稍后重试或配置代理"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"has_update":      false,
+			"current_version": version.Version,
+			"latest_version":  version.Version,
+			"error":           errMsg,
+			"checked_at":      time.Now().Format(time.RFC3339),
+		})
+		return
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -138,7 +192,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	latestVer := rel.TagName
 	hasUpdate := compareVersions(latestVer, version.Version) > 0
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	respMap := map[string]any{
 		"has_update":      hasUpdate,
 		"current_version": version.Version,
 		"latest_version":  latestVer,
@@ -147,7 +201,12 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		"release_url":     rel.HTMLURL,
 		"published_at":    rel.PublishedAt,
 		"checked_at":      time.Now().Format(time.RFC3339),
-	})
+	}
+	if !hasUpdate {
+		respMap["message"] = fmt.Sprintf("当前已是最新发布版本 (%s)", latestVer)
+	}
+
+	writeJSON(w, http.StatusOK, respMap)
 }
 
 // handleSeamlessRestart 平滑热重启服务：POST /api/admin/update/restart

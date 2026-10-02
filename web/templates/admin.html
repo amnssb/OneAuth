@@ -1183,6 +1183,34 @@
                         <a id="releaseLink" href="#" target="_blank" class="btn btn-secondary" style="display:inline-flex; font-size:0.85rem; padding:6px 14px; text-decoration:none;">📦 查看 GitHub Release</a>
                     </div>
 
+                    <div style="background:var(--ai-surface-container); border-radius:12px; padding:16px; margin-bottom:20px; border:1px solid var(--ai-border);">
+                        <div style="font-weight:600; font-size:0.92rem; margin-bottom:12px; display:flex; align-items:center; gap:8px;">
+                            <span>🌐 更新源与网络代理配置</span>
+                            <span class="label-hint">（网络连接 GitHub 受限时可配置自定义镜像源或本地 HTTP/SOCKS5 代理）</span>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group full-width">
+                                <label>更新检查源 API <span class="label-hint">默认为 GitHub Releases API</span></label>
+                                <div class="input-wrapper">
+                                    <span class="input-icon">🔗</span>
+                                    <input id="updateCheckUrl" type="text" placeholder="https://api.github.com/repos/amnssb/OneAuth/releases/latest">
+                                </div>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>网络代理 (Proxy) <span class="label-hint">选填，支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:10808，留空为直连</span></label>
+                                <div class="input-wrapper">
+                                    <span class="input-icon">🛡️</span>
+                                    <input id="updateProxy" type="text" placeholder="例如: http://127.0.0.1:7890 或 socks5://127.0.0.1:10808 (留空为直连)">
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display:flex; justify-content:flex-end; margin-top:8px;">
+                            <button class="btn btn-secondary" style="font-size:0.82rem; padding:6px 14px;" onclick="withBusy(this, () => saveSettings('update'))">
+                                <span>💾 保存更新源设置</span>
+                            </button>
+                        </div>
+                    </div>
+
                     <div style="display:flex; gap:12px; justify-content:flex-end; flex-wrap:wrap;">
                         <button class="btn btn-secondary" onclick="withBusy(this, checkAppUpdate)">
                             <span>🔍 检查新版本</span>
@@ -1531,6 +1559,8 @@
             $('botToken').value = s.onebot_token || '';
             $('codeTtl').value = s.code_ttl || '180';
             $('demoEnabled').value = s.demo_enabled === 'false' ? 'false' : 'true';
+            $('updateCheckUrl').value = s.update_check_url || 'https://api.github.com/repos/amnssb/OneAuth/releases/latest';
+            $('updateProxy').value = s.update_proxy || '';
 
             $('statTargetGroup').innerText = s.target_group_id || '未配置';
             $('statCodeTtl').innerText = (s.code_ttl || '180') + 's';
@@ -1560,6 +1590,10 @@
         const demo = {
             demo_enabled: $('demoEnabled').value
         };
+        const update = {
+            update_check_url: $('updateCheckUrl').value,
+            update_proxy: $('updateProxy').value
+        };
         if (scope === 'bot' || !scope) {
             const ttl = bot.code_ttl.trim();
             if (ttl !== '' && (!/^\d+$/.test(ttl) || +ttl < 10 || +ttl > 3600)) {
@@ -1569,7 +1603,8 @@
         const body = scope === 'bot' ? bot
             : scope === 'appearance' ? appearance
             : scope === 'demo' ? demo
-            : Object.assign({}, appearance, bot, demo);
+            : scope === 'update' ? update
+            : Object.assign({}, appearance, bot, demo, update);
         await apiFetch('/api/admin/settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1929,6 +1964,7 @@
         try {
             $('verStatusVal').innerText = '检查中…';
             $('verStatusVal').style.color = 'var(--ai-text)';
+            $('verStatusHint').innerText = '正在向更新服务请求版本元数据…';
             const data = await apiFetch('/api/admin/update/check');
             if (data.has_update) {
                 $('verStatusVal').innerText = '发现新版本';
@@ -1940,12 +1976,18 @@
                 $('releaseNotes').innerText = data.release_notes || '暂无详细更新说明';
                 $('releaseLink').href = data.release_url || '#';
                 showToast('发现新版本: ' + data.latest_version, 'success');
+            } else if (data.error) {
+                $('verStatusVal').innerText = '检查受限';
+                $('verStatusVal').style.color = 'var(--ai-warning)';
+                $('verStatusHint').innerText = data.error;
+                $('updateReleaseBox').classList.add('hidden');
+                showToast(data.error, 'error');
             } else {
                 $('verStatusVal').innerText = '已是最新版';
                 $('verStatusVal').style.color = 'var(--ai-text)';
-                $('verStatusHint').innerText = data.error ? data.error : '当前已是最新发布版本';
+                $('verStatusHint').innerText = data.message || '当前已是最新发布版本';
                 $('updateReleaseBox').classList.add('hidden');
-                showToast(data.error ? data.error : '当前已是最新版本', data.error ? 'error' : 'success');
+                showToast(data.message || '当前已是最新版本', 'success');
             }
         } catch (e) {
             $('verStatusVal').innerText = '检查失败';

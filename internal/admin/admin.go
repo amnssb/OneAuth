@@ -615,28 +615,32 @@ func handlePreviewLogin(w http.ResponseWriter, r *http.Request) {
 // ---- 系统设置 ----
 
 var allowedSettings = map[string]bool{
-	"site_name":       true,
-	"prompt_text":     true,
-	"background_url":  true,
-	"custom_css":      true,
-	"target_group_id": true,
-	"onebot_token":    true,
-	"code_ttl":        true,
-	"site_logo":       true,
-	"demo_enabled":    true,
+	"site_name":        true,
+	"prompt_text":      true,
+	"background_url":   true,
+	"custom_css":       true,
+	"target_group_id":  true,
+	"onebot_token":     true,
+	"code_ttl":         true,
+	"site_logo":        true,
+	"demo_enabled":     true,
+	"update_check_url": true,
+	"update_proxy":     true,
 }
 
 func settingLabel(key string) string {
 	labels := map[string]string{
-		"site_name":       "站点名称",
-		"prompt_text":     "提示文案",
-		"background_url":  "背景图 URL",
-		"custom_css":      "自定义 CSS",
-		"target_group_id": "默认 QQ 群号",
-		"onebot_token":    "OneBot Token",
-		"code_ttl":        "验证码有效期",
-		"site_logo":       "站点 Logo URL",
-		"demo_enabled":    "内置体验应用开关",
+		"site_name":        "站点名称",
+		"prompt_text":      "提示文案",
+		"background_url":   "背景图 URL",
+		"custom_css":       "自定义 CSS",
+		"target_group_id":  "默认 QQ 群号",
+		"onebot_token":     "OneBot Token",
+		"code_ttl":         "验证码有效期",
+		"site_logo":        "站点 Logo URL",
+		"demo_enabled":     "内置体验应用开关",
+		"update_check_url": "更新检查地址",
+		"update_proxy":     "更新网络代理",
 	}
 	if l, ok := labels[key]; ok {
 		return l
@@ -675,6 +679,30 @@ func validateSetting(key, val string) error {
 			return errors.New(settingLabel(key) + " 必须是 http(s) 直链")
 		}
 		return nil
+	case "update_check_url":
+		if val == "" {
+			return nil
+		}
+		if err := checkLength(settingLabel(key), val, 2048); err != nil {
+			return err
+		}
+		u, err := url.Parse(val)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return errors.New(settingLabel(key) + " 必须是 http(s) 直链")
+		}
+		return nil
+	case "update_proxy":
+		if val == "" {
+			return nil
+		}
+		if err := checkLength(settingLabel(key), val, 1024); err != nil {
+			return err
+		}
+		u, err := url.Parse(val)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
+			return errors.New(settingLabel(key) + " 必须是 http、https 或 socks5 代理地址")
+		}
+		return nil
 	case "target_group_id":
 		if val == "" {
 			return nil
@@ -702,15 +730,17 @@ func validateSetting(key, val string) error {
 
 func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := map[string]string{
-		"site_name":       database.GetSetting("site_name", ""),
-		"prompt_text":     database.GetSetting("prompt_text", "请发送验证码至群"),
-		"background_url":  database.GetSetting("background_url", ""),
-		"custom_css":      database.GetSetting("custom_css", ""),
-		"target_group_id": database.GetSetting("target_group_id", ""),
-		"onebot_token":    database.GetSetting("onebot_token", ""),
-		"code_ttl":        database.GetSetting("code_ttl", ""),
-		"site_logo":       database.GetSetting("site_logo", ""),
-		"demo_enabled":    database.GetSetting("demo_enabled", "true"),
+		"site_name":        database.GetSetting("site_name", ""),
+		"prompt_text":      database.GetSetting("prompt_text", "请发送验证码至群"),
+		"background_url":   database.GetSetting("background_url", ""),
+		"custom_css":       database.GetSetting("custom_css", ""),
+		"target_group_id":  database.GetSetting("target_group_id", ""),
+		"onebot_token":     database.GetSetting("onebot_token", ""),
+		"code_ttl":         database.GetSetting("code_ttl", ""),
+		"site_logo":        database.GetSetting("site_logo", ""),
+		"demo_enabled":     database.GetSetting("demo_enabled", "true"),
+		"update_check_url": database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"),
+		"update_proxy":     database.GetSetting("update_proxy", ""),
 	}
 	writeJSON(w, http.StatusOK, settings)
 }

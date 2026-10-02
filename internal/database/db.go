@@ -133,6 +133,7 @@ func migrate() error {
 			('code_ttl', '180'),
 			('demo_enabled', 'true'),
 			('update_check_url', 'https://api.github.com/repos/amnssb/OneAuth/releases/latest'),
+			('update_proxy', ''),
 			('bot_status_cmd_enabled', 'true');`,
 	}
 
