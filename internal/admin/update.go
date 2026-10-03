@@ -2,6 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"oneauth/internal/database"
@@ -88,20 +92,36 @@ func compareVersions(v1, v2 string) int {
 	return 0
 }
 
-// handleCheckUpdate 检查新版本：GET /api/admin/update/check
-func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
-	checkURL := strings.TrimSpace(database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"))
-	if checkURL == "" {
-		checkURL = "https://api.github.com/repos/amnssb/OneAuth/releases/latest"
+var (
+	updateClientMu     sync.RWMutex
+	cachedUpdateClient *http.Client
+	cachedProxySetting string
+)
+
+func getUpdateHTTPClient(proxySetting string) *http.Client {
+	updateClientMu.RLock()
+	if cachedUpdateClient != nil && cachedProxySetting == proxySetting {
+		c := cachedUpdateClient
+		updateClientMu.RUnlock()
+		return c
+	}
+	updateClientMu.RUnlock()
+
+	updateClientMu.Lock()
+	defer updateClientMu.Unlock()
+
+	if cachedUpdateClient != nil && cachedProxySetting == proxySetting {
+		return cachedUpdateClient
 	}
 
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 12 * time.Second,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       30 * time.Second,
 	}
 
-	proxySetting := strings.TrimSpace(database.GetSetting("update_proxy", ""))
 	if proxySetting != "" {
 		if proxyURL, err := url.Parse(proxySetting); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
@@ -110,10 +130,23 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{
+	cachedProxySetting = proxySetting
+	cachedUpdateClient = &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: transport,
 	}
+	return cachedUpdateClient
+}
+
+// handleCheckUpdate 检查新版本：GET /api/admin/update/check
+func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
+	checkURL := strings.TrimSpace(database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"))
+	if checkURL == "" {
+		checkURL = "https://api.github.com/repos/amnssb/OneAuth/releases/latest"
+	}
+
+	proxySetting := strings.TrimSpace(database.GetSetting("update_proxy", ""))
+	client := getUpdateHTTPClient(proxySetting)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, checkURL, nil)
 	if err != nil {
@@ -266,7 +299,7 @@ func triggerSeamlessRestart() {
 	cmd.Stdin = os.Stdin
 
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("[无感更新] 拉起新进程失败: %v", err)
+		log.Printf("[无感更新] 拉起新进程失败: %v", err)
 		return
 	}
 
@@ -277,6 +310,11 @@ func triggerSeamlessRestart() {
 // handleApplyUpdate 在线热更新二进制：POST /api/admin/update/apply
 func handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[无感更新] 收到管理员 (IP: %s) 发起的二进制更新应用请求", clientIP(r))
+
+	if database.GetSetting("allow_binary_update", "true") == "false" {
+		writeError(w, http.StatusForbidden, "系统设置已禁用通过 Web 接口在线更新二进制")
+		return
+	}
 
 	// 限制文件上传大小为 100MB
 	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
@@ -301,13 +339,47 @@ func handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	tempPath := tempFile.Name()
 
-	if _, err := io.Copy(tempFile, file); err != nil {
+	hasher := sha256.New()
+	tee := io.TeeReader(file, hasher)
+
+	if _, err := io.Copy(tempFile, tee); err != nil {
 		tempFile.Close()
 		_ = os.Remove(tempPath)
 		writeError(w, http.StatusInternalServerError, "写入临时更新文件失败: "+err.Error())
 		return
 	}
+
+	computedSha256 := hex.EncodeToString(hasher.Sum(nil))
+	expectedChecksum := strings.TrimSpace(r.FormValue("checksum"))
+	if expectedChecksum == "" {
+		expectedChecksum = strings.TrimSpace(r.FormValue("sha256"))
+	}
+	if expectedChecksum != "" {
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(expectedChecksum)), []byte(strings.ToLower(computedSha256))) != 1 {
+			tempFile.Close()
+			_ = os.Remove(tempPath)
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("文件 SHA-256 校验失败：期望 %s，实际 %s", expectedChecksum, computedSha256))
+			return
+		}
+	}
+
+	// 校验二进制文件的格式（至少 4 字节魔数），防止上传非执行文件、空文件或损坏脚本覆盖主程序
+	header := make([]byte, 4)
+	if n, err := tempFile.ReadAt(header, 0); err != nil || n < 4 {
+		tempFile.Close()
+		_ = os.Remove(tempPath)
+		writeError(w, http.StatusBadRequest, "上传的二进制文件格式无效或文件为空")
+		return
+	}
 	tempFile.Close()
+
+	isWindowsPE := header[0] == 'M' && header[1] == 'Z'
+	isLinuxELF := header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F'
+	if !isWindowsPE && !isLinuxELF {
+		_ = os.Remove(tempPath)
+		writeError(w, http.StatusBadRequest, "上传的文件不是有效的可执行程序格式（仅支持 Windows PE 或 Linux ELF）")
+		return
+	}
 
 	// 赋予可执行权限
 	_ = os.Chmod(tempPath, 0755)
@@ -331,8 +403,9 @@ func handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true,
-		"message": "新版本二进制已成功就绪，正在无感平滑切换...",
+		"success":  true,
+		"message":  "新版本二进制已成功就绪，正在无感平滑切换...",
+		"sha256":   computedSha256,
 	})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()

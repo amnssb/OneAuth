@@ -86,35 +86,50 @@ sequenceDiagram
 
 ### 2.1 核心 OIDC 端点
 
-> **多 Issuer（多租户）**：每个 OIDC 应用拥有独立 Issuer `https://<host>/{slug}`，协议端点全部挂在该 slug 前缀下、由各自独立的 RSA 密钥签发。`{slug}` 即在管理后台创建应用时填写的「Issuer 标识」。
+> **统一根 Issuer 与多租户双模架构**：
+> - **统一根 Issuer (`https://<host>`)**：所有客户端默认共享的标准化统一身份提供商，支持开箱即用自动发现与公钥拉取。
+> - **租户隔离 Issuer (`https://<host>/{slug}`)**：为需要独立核验群或专属签名密钥的应用提供完全独立的 Issuer 端点。
 
 | 请求方法 | 路径 | 功能说明 | 认证要求 |
 |---|---|---|---|
-| `GET` | `/{slug}/.well-known/openid-configuration` | 该应用的 OpenID Connect 自动发现文档（追加式） | 公开 |
-| `GET` | `/.well-known/openid-configuration/{slug}` | 同上（RFC 8414 插入式，兼容部分客户端库） | 公开 |
-| `GET` | `/{slug}/.well-known/jwks.json` | 该应用的 RS256 签名公钥 JWKS 集合 | 公开 |
-| `GET` | `/{slug}/authorize` | OAuth2 授权端点（支持 PKCE S256） | 公开 |
-| `POST` | `/{slug}/token` | 授权码换取令牌端点 | HTTP Basic 或 POST Form (`client_secret` 或 `code_verifier`) |
-| `GET` | `/{slug}/userinfo` | 获取用户资料端点（按 kid+iss 校验，跨租户令牌被拒） | `Authorization: Bearer <access_token>` |
+| `GET` | `/.well-known/openid-configuration` | **统一根 Issuer** OpenID Connect 自动发现文档 | 公开 |
+| `GET` | `/.well-known/jwks.json` | **统一根 Issuer** RS256 签名公钥 JWKS 集合 | 公开 |
+| `GET` | `/authorize` | OAuth2 / OIDC 授权端点（支持 PKCE S256、nonce 与错误重定向） | 公开 |
+| `POST` | `/token` | 令牌兑换端点（支持 `authorization_code` 与 `refresh_token`） | HTTP Basic 或 POST Form |
+| `GET/POST`| `/userinfo` | 获取用户资料端点（按 Bearer JWT 校验） | `Authorization: Bearer <access_token>` |
+| `POST` | `/revoke` | RFC 7009 令牌撤销端点（撤销 Refresh Token） | 客户端凭证 |
+| `POST` | `/introspect` | RFC 7662 令牌内省端点（查询令牌激活状态与元数据） | 客户端凭证 |
+| `GET/POST`| `/logout` | OIDC RP-Initiated Logout 1.0 登出端点 | 公开 / `id_token_hint` |
+| `GET` | `/{slug}/.well-known/openid-configuration` | 租户应用专属发现文档（追加式） | 公开 |
+| `GET` | `/.well-known/openid-configuration/{slug}` | 租户应用专属发现文档（RFC 8414 插入式） | 公开 |
+| `GET` | `/{slug}/.well-known/jwks.json` | 租户应用专属 RS256 公钥集合 | 公开 |
+| `GET` | `/{slug}/authorize` | 租户应用专属授权端点 | 公开 |
+| `POST` | `/{slug}/token` | 租户应用专属令牌换取端点 | 客户端凭证 |
+| `GET/POST`| `/{slug}/userinfo` | 租户应用专属资料获取端点（按租户密钥强校验） | `Authorization: Bearer <access_token>` |
+| `POST` | `/{slug}/revoke` | 租户应用专属令牌撤销端点 | 客户端凭证 |
+| `POST` | `/{slug}/introspect` | 租户应用专属令牌内省端点 | 客户端凭证 |
+| `GET/POST`| `/{slug}/logout` | 租户应用专属登出端点 | 公开 |
 | `GET` | `/login` | 用户前台验证码核销页面 | 携带 `session_id` |
 | `GET` | `/api/session/stream` | Server-Sent Events (SSE) 状态推送流 | 携带 `session_id` |
 | `WS` | `/ws/onebot` | OneBot v11/v12 反向 WebSocket 接收端点 | 可选 URL Query `?access_token=` 鉴权 |
 
-> ⚠️ **破坏性变更**：旧版本的根路径端点（`/.well-known/openid-configuration`、`/authorize`、`/token`、`/userinfo`、`/.well-known/jwks.json`）已退役。升级后所有存量应用会在启动时被自动分配 `issuer_slug`（默认取 client_id 规整值，结果打印在启动日志），接入方需把发现地址改为 `https://<host>/{slug}/.well-known/openid-configuration`。管理后台「应用管理」列表可查看每个应用的 Issuer URL 与签名密钥 kid，并支持一键轮换密钥（旧密钥保留 7 天宽限期）。
-
 ### 2.2 JWT Claims 规范 (ID Token)
 ```json
 {
-  "iss": "https://auth.example.com/gitea",
+  "iss": "https://auth.example.com",
   "sub": "123456789",
   "aud": "client_abc123",
   "exp": 1758999999,
   "iat": 1758996399,
+  "auth_time": 1758996395,
+  "nonce": "n-0S6_WzA2Mj",
+  "at_hash": "77QmUPtjPfzWtEcpaLTBxQ",
   "name": "QQ用户_123456789",
   "preferred_username": "123456789",
   "email": "123456789@qq.com",
   "email_verified": true,
-  "picture": "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=640"
+  "picture": "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=640",
+  "identity_provider": "qq"
 }
 ```
 

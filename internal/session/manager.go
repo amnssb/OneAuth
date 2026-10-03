@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,21 +22,26 @@ const (
 )
 
 type AuthSession struct {
-	SessionID     string
-	ClientID      string
-	RedirectURI   string
-	State         string
-	CodeChallenge string
-	VerifyCode    string
+	SessionID           string
+	ClientID            string
+	RedirectURI         string
+	State               string
+	Nonce               string
+	Scopes              []string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	VerifyCode          string
 	// GroupID 是该会话绑定的核验 QQ 群号。由发起授权的应用决定
 	// （应用级 target_group_id），为空时回落到全局设置。核销时
 	// 必须与消息来源群号一致，否则拒绝核销。
-	GroupID       string
+	GroupID    string
+	IssuerSlug string
 	// 核销后的平台身份：Provider 标识来源平台（见 internal/identity），
 	// UserID 为该平台内的用户标识（qq 平台下即 QQ 号）。
 	// 核销前两者均为空。
 	Provider   string
 	UserID     string
+	AuthTime   int64
 	AuthCode   string
 	Status     SessionStatus
 	ExpiresAt  time.Time
@@ -54,11 +60,19 @@ type Manager struct {
 	codeIndex     map[string]*AuthSession
 	authCodeIndex map[string]*AuthSession
 
+	// 实时状态原子计数器，实现 Stats() 的 O(1) 瞬时读取，避免全表加锁扫描
+	pendingCount  atomic.Int64
+	verifiedCount atomic.Int64
+	consumedCount atomic.Int64
+	totalCount    atomic.Int64
+
 	// 自进程启动以来的累计计数：创建过的会话总数与核销成功次数。
 	// 与 sessions 的实时快照不同，它们只增不减（重启归零），供管理后台
 	// 展示登录活跃度 —— 低流量部署下快照几乎恒为 0，累计值才有参考意义。
 	totalCreated  atomic.Uint64
 	totalVerified atomic.Uint64
+
+	stopChan chan struct{}
 }
 
 var DefaultManager = NewManager()
@@ -68,9 +82,19 @@ func NewManager() *Manager {
 		sessions:      make(map[string]*AuthSession),
 		codeIndex:     make(map[string]*AuthSession),
 		authCodeIndex: make(map[string]*AuthSession),
+		stopChan:      make(chan struct{}),
 	}
 	go m.startCleaner()
 	return m
+}
+
+// Close 优雅停止后台清理协程
+func (m *Manager) Close() {
+	select {
+	case <-m.stopChan:
+	default:
+		close(m.stopChan)
+	}
 }
 
 const charset = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
@@ -109,10 +133,28 @@ func randomCode(length int) (string, error) {
 	return string(out), nil
 }
 
-func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID string, ttlSeconds int) (*AuthSession, error) {
+type CreateSessionOptions struct {
+	ClientID            string
+	RedirectURI         string
+	State               string
+	Nonce               string
+	Scopes              []string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	GroupID             string
+	IssuerSlug          string
+	TTLSeconds          int
+}
+
+func (m *Manager) CreateSessionWithOptions(opts CreateSessionOptions) (*AuthSession, error) {
 	sessionID, err := generateRandomHex(16)
 	if err != nil {
 		return nil, err
+	}
+
+	ttl := opts.TTLSeconds
+	if ttl <= 0 {
+		ttl = 180
 	}
 
 	m.mu.Lock()
@@ -128,25 +170,42 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID
 		}
 
 		session := &AuthSession{
-			SessionID:     sessionID,
-			ClientID:      clientID,
-			RedirectURI:   redirectURI,
-			State:         state,
-			CodeChallenge: challenge,
-			VerifyCode:    code,
-			GroupID:       groupID,
-			Status:        StatusPending,
-			ExpiresAt:     time.Now().Add(time.Duration(ttlSeconds) * time.Second),
-			NotifyChan:    make(chan struct{}),
+			SessionID:           sessionID,
+			ClientID:            opts.ClientID,
+			RedirectURI:         opts.RedirectURI,
+			State:               opts.State,
+			Nonce:               opts.Nonce,
+			Scopes:              opts.Scopes,
+			CodeChallenge:       opts.CodeChallenge,
+			CodeChallengeMethod: opts.CodeChallengeMethod,
+			VerifyCode:          code,
+			GroupID:             opts.GroupID,
+			IssuerSlug:          opts.IssuerSlug,
+			Status:              StatusPending,
+			ExpiresAt:           time.Now().Add(time.Duration(ttl) * time.Second),
+			NotifyChan:          make(chan struct{}),
 		}
 
 		m.sessions[sessionID] = session
 		m.codeIndex[code] = session
 		m.totalCreated.Add(1)
+		m.pendingCount.Add(1)
+		m.totalCount.Add(1)
 
 		return session, nil
 	}
 	return nil, errors.New("failed to generate unique code after 100 attempts")
+}
+
+func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID string, ttlSeconds int) (*AuthSession, error) {
+	return m.CreateSessionWithOptions(CreateSessionOptions{
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		State:         state,
+		CodeChallenge: challenge,
+		GroupID:       groupID,
+		TTLSeconds:    ttlSeconds,
+	})
 }
 
 // VerifyCode 把验证码核销为平台身份并绑定到会话。provider 标识核销通道
@@ -173,8 +232,11 @@ func (m *Manager) VerifyCode(provider, code, userID, groupID string) (*AuthSessi
 
 	session.Provider = provider
 	session.UserID = userID
+	session.AuthTime = time.Now().Unix()
 	session.Status = StatusVerified
 	m.totalVerified.Add(1)
+	m.pendingCount.Add(-1)
+	m.verifiedCount.Add(1)
 
 	delete(m.codeIndex, code)
 	close(session.NotifyChan)
@@ -202,6 +264,8 @@ func (m *Manager) IssueAuthCode(sessionID string) (string, *AuthSession, bool) {
 
 	session.AuthCode = authCode
 	session.Status = StatusConsumed
+	m.verifiedCount.Add(-1)
+	m.consumedCount.Add(1)
 	m.authCodeIndex[authCode] = session
 
 	return authCode, session, true
@@ -247,41 +311,64 @@ func (m *Manager) Stats() SessionStats {
 	s.CreatedTotal = m.totalCreated.Load()
 	s.VerifiedTotal = m.totalVerified.Load()
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	pending := int(m.pendingCount.Load())
+	verified := int(m.verifiedCount.Load())
+	consumed := int(m.consumedCount.Load())
+	total := int(m.totalCount.Load())
 
-	for _, sess := range m.sessions {
-		switch sess.Status {
-		case StatusPending:
-			s.Pending++
-		case StatusVerified:
-			s.Verified++
-		case StatusConsumed:
-			s.Consumed++
-		}
-		s.Total++
+	if pending < 0 {
+		pending = 0
 	}
+	if verified < 0 {
+		verified = 0
+	}
+	if consumed < 0 {
+		consumed = 0
+	}
+	if total < 0 {
+		total = 0
+	}
+
+	s.Pending = pending
+	s.Verified = verified
+	s.Consumed = consumed
+	s.Total = total
 	return s
 }
 
 func (m *Manager) startCleaner() {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.mu.Lock()
-		now := time.Now()
-		for id, session := range m.sessions {
-			if now.After(session.ExpiresAt) {
-				delete(m.sessions, id)
-				if session.VerifyCode != "" {
-					delete(m.codeIndex, session.VerifyCode)
-				}
-				if session.AuthCode != "" {
-					delete(m.authCodeIndex, session.AuthCode)
+	for {
+		select {
+		case <-m.stopChan:
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			now := time.Now()
+			for id, session := range m.sessions {
+				if now.After(session.ExpiresAt) {
+					switch session.Status {
+					case StatusPending:
+						m.pendingCount.Add(-1)
+					case StatusVerified:
+						m.verifiedCount.Add(-1)
+					case StatusConsumed:
+						m.consumedCount.Add(-1)
+					}
+					m.totalCount.Add(-1)
+
+					delete(m.sessions, id)
+					if session.VerifyCode != "" {
+						delete(m.codeIndex, session.VerifyCode)
+					}
+					if session.AuthCode != "" {
+						delete(m.authCodeIndex, session.AuthCode)
+					}
 				}
 			}
+			m.mu.Unlock()
 		}
-		m.mu.Unlock()
 	}
 }
 
@@ -307,8 +394,8 @@ func (m *Manager) SaveStateToDB() error {
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO transient_sessions_backup 
-		(session_id, client_id, redirect_uri, state, code_challenge, verify_code, group_id, provider, user_id, auth_code, status, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(session_id, client_id, redirect_uri, state, code_challenge, verify_code, group_id, provider, user_id, auth_code, status, expires_at, nonce, scopes, code_challenge_method, issuer_slug, auth_time)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -318,15 +405,17 @@ func (m *Manager) SaveStateToDB() error {
 	count := 0
 	for _, sess := range m.sessions {
 		if now.Before(sess.ExpiresAt) {
+			scopesStr := strings.Join(sess.Scopes, " ")
 			_, err := stmt.Exec(
 				sess.SessionID, sess.ClientID, sess.RedirectURI, sess.State,
 				sess.CodeChallenge, sess.VerifyCode, sess.GroupID,
 				sess.Provider, sess.UserID, sess.AuthCode,
 				string(sess.Status), sess.ExpiresAt,
+				sess.Nonce, scopesStr, sess.CodeChallengeMethod, sess.IssuerSlug, sess.AuthTime,
 			)
 			if err != nil {
-				log.Printf("[无感更新] 会话备份写入异常: %v", err)
-				continue
+				log.Printf("[无感更新] 会话备份写入异常，回滚事务: %v", err)
+				return err
 			}
 			count++
 		}
@@ -346,7 +435,9 @@ func (m *Manager) RestoreStateFromDB() (int, error) {
 	}
 	rows, err := database.DB.Query(`
 		SELECT session_id, client_id, redirect_uri, state, code_challenge, verify_code, 
-		       group_id, provider, user_id, auth_code, status, expires_at
+		       group_id, provider, user_id, auth_code, status, expires_at,
+		       COALESCE(nonce, ''), COALESCE(scopes, ''), COALESCE(code_challenge_method, ''),
+		       COALESCE(issuer_slug, ''), COALESCE(auth_time, 0)
 		FROM transient_sessions_backup
 		WHERE expires_at > CURRENT_TIMESTAMP
 	`)
@@ -363,17 +454,27 @@ func (m *Manager) RestoreStateFromDB() (int, error) {
 		var s AuthSession
 		var statusStr string
 		var expiresAt time.Time
+		var nonce, scopesStr, method, slug string
+		var authTime int64
 		if err := rows.Scan(
 			&s.SessionID, &s.ClientID, &s.RedirectURI, &s.State,
 			&s.CodeChallenge, &s.VerifyCode, &s.GroupID,
 			&s.Provider, &s.UserID, &s.AuthCode,
 			&statusStr, &expiresAt,
+			&nonce, &scopesStr, &method, &slug, &authTime,
 		); err != nil {
 			continue
 		}
 
 		s.Status = SessionStatus(statusStr)
 		s.ExpiresAt = expiresAt
+		s.Nonce = nonce
+		if scopesStr != "" {
+			s.Scopes = strings.Fields(scopesStr)
+		}
+		s.CodeChallengeMethod = method
+		s.IssuerSlug = slug
+		s.AuthTime = authTime
 		s.NotifyChan = make(chan struct{})
 		if s.Status == StatusVerified {
 			close(s.NotifyChan)
@@ -386,7 +487,21 @@ func (m *Manager) RestoreStateFromDB() (int, error) {
 		if s.AuthCode != "" && s.Status == StatusConsumed {
 			m.authCodeIndex[s.AuthCode] = &s
 		}
+
+		switch s.Status {
+		case StatusPending:
+			m.pendingCount.Add(1)
+		case StatusVerified:
+			m.verifiedCount.Add(1)
+		case StatusConsumed:
+			m.consumedCount.Add(1)
+		}
+		m.totalCount.Add(1)
+
 		restored++
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[无感更新] 恢复会话遍历异常: %v", err)
 	}
 
 	if restored > 0 {

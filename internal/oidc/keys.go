@@ -21,14 +21,18 @@ const keyRotationGrace = 7 * 24 * time.Hour
 // tenantKeyCache 是按 issuer_slug 缓存的当前在用签名私钥，避免每次签发
 // /{slug}/token 都要访问 SQLite 并重新解析 PEM。
 type tenantKeyCache struct {
-	mu      sync.RWMutex
-	private map[string]*rsa.PrivateKey // slug -> 当前在用私钥
-	kid     map[string]string          // slug -> 当前在用 kid
+	mu          sync.RWMutex
+	private     map[string]*rsa.PrivateKey // slug -> 当前在用私钥
+	kid         map[string]string          // slug -> 当前在用 kid
+	jwksEntries map[string][]jwkEntry      // slug -> 当前在用/宽限期公钥列表
+	jwksExpiry  map[string]time.Time       // slug -> 缓存过期时间
 }
 
 var tenantKeys = &tenantKeyCache{
-	private: make(map[string]*rsa.PrivateKey),
-	kid:     make(map[string]string),
+	private:     make(map[string]*rsa.PrivateKey),
+	kid:         make(map[string]string),
+	jwksEntries: make(map[string][]jwkEntry),
+	jwksExpiry:  make(map[string]time.Time),
 }
 
 func encodePrivatePEM(key *rsa.PrivateKey) string {
@@ -82,6 +86,8 @@ func TenantSigningKey(slug string) (*rsa.PrivateKey, string, error) {
 	}
 	tenantKeys.private[slug] = pk
 	tenantKeys.kid[slug] = kid
+	delete(tenantKeys.jwksEntries, slug)
+	delete(tenantKeys.jwksExpiry, slug)
 	return pk, kid, nil
 }
 
@@ -113,6 +119,8 @@ func RotateTenantKey(slug string) (newKid string, err error) {
 	}
 	tenantKeys.private[slug] = pk
 	tenantKeys.kid[slug] = kid
+	delete(tenantKeys.jwksEntries, slug)
+	delete(tenantKeys.jwksExpiry, slug)
 
 	if err := database.PurgeExpiredTenantKeys(slug, keyRotationGrace); err != nil {
 		// 清理失败不影响本次轮换结果，记日志即可，下次轮换/JWKS 请求会
@@ -120,6 +128,21 @@ func RotateTenantKey(slug string) (newKid string, err error) {
 		log.Printf("[OIDC] 清理租户 %s 过期密钥失败（不影响本次轮换）: %v", slug, err)
 	}
 	return kid, nil
+}
+
+// RootSigningKey 返回统一根 Issuer（slug 为空）当前在用的 RSA 私钥与 kid。
+func RootSigningKey() (*rsa.PrivateKey, string, error) {
+	return TenantSigningKey("")
+}
+
+// RootJWKSEntries 返回统一根 Issuer 当前在 JWKS 中公布的全部公钥。
+func RootJWKSEntries() ([]jwkEntry, error) {
+	return tenantJWKSEntries("")
+}
+
+// RotateRootKey 轮换统一根 Issuer 的签名密钥。
+func RotateRootKey() (string, error) {
+	return RotateTenantKey("")
 }
 
 // jwkEntry 是渲染 JWKS 文档时需要的最小信息。
@@ -130,7 +153,15 @@ type jwkEntry struct {
 
 // tenantJWKSEntries 返回某租户当前应该在 JWKS 中公布的全部公钥：在用
 // 密钥 + 宽限期内的退休密钥，按创建时间新到旧排列。
+// 内存带 TTL 缓存，避免每次 /userinfo 校验都打 SQLite + RSA PEM 反序列化。
 func tenantJWKSEntries(slug string) ([]jwkEntry, error) {
+	tenantKeys.mu.RLock()
+	if entries, ok := tenantKeys.jwksEntries[slug]; ok && time.Now().Before(tenantKeys.jwksExpiry[slug]) {
+		tenantKeys.mu.RUnlock()
+		return entries, nil
+	}
+	tenantKeys.mu.RUnlock()
+
 	rows, err := database.TenantJWKSKeys(slug, keyRotationGrace)
 	if err != nil {
 		return nil, err
@@ -144,6 +175,18 @@ func tenantJWKSEntries(slug string) ([]jwkEntry, error) {
 		}
 		out = append(out, jwkEntry{kid: row.Kid, pub: &pk.PublicKey})
 	}
+
+	tenantKeys.mu.Lock()
+	if len(out) > 0 {
+		if tenantKeys.jwksEntries == nil {
+			tenantKeys.jwksEntries = make(map[string][]jwkEntry)
+			tenantKeys.jwksExpiry = make(map[string]time.Time)
+		}
+		tenantKeys.jwksEntries[slug] = out
+		tenantKeys.jwksExpiry[slug] = time.Now().Add(5 * time.Minute)
+	}
+	tenantKeys.mu.Unlock()
+
 	return out, nil
 }
 

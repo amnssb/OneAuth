@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -155,7 +156,8 @@ func main() {
 
 	log.Printf("🚀 OneAuth %s (%s) 已启动 → http://0.0.0.0:%s\n", version.Version, version.GitCommit, port)
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
-	log.Printf("🔗 OIDC 发现（多 Issuer）→ http://localhost:%s/{issuer_slug}/.well-known/openid-configuration\n", port)
+	log.Printf("🔗 统一根 Issuer 发现 → http://localhost:%s/.well-known/openid-configuration\n", port)
+	log.Printf("🔗 租户应用发现（多 Issuer）→ http://localhost:%s/{issuer_slug}/.well-known/openid-configuration\n", port)
 	log.Printf("🤖 OneBot WS → ws://localhost:%s/ws/onebot\n", port)
 
 	// 显式配置 Server：ReadHeaderTimeout 防 Slowloris 慢连接占用；
@@ -212,10 +214,11 @@ func getEnv(key, defaultVal string) string {
 }
 
 const (
-	demoClientID     = "oneauth_demo_app"
-	demoClientSecret = "demo_secret_888888"
-	demoIssuerSlug   = "demo-app"
+	demoClientID   = "oneauth_demo_app"
+	demoIssuerSlug = "demo-app"
 )
+
+var demoClientSecret = getEnv("DEMO_CLIENT_SECRET", "demo_secret_888888")
 
 // demoGuard 用 demo_enabled 系统设置包裹 demo 相关 handler：关闭时统一
 // 返回 404，不泄露 demo 路由是否存在，也不影响其余路由的正常访问。
@@ -340,14 +343,17 @@ func handleHomePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func initDemoClient() {
-	h := sha256.Sum256([]byte(demoClientSecret))
-	secretHash := base64.RawURLEncoding.EncodeToString(h[:])
+	secretHash, err := oidc.HashSecret(demoClientSecret)
+	if err != nil {
+		h := sha256.Sum256([]byte(demoClientSecret))
+		secretHash = base64.RawURLEncoding.EncodeToString(h[:])
+	}
 	// 多 Issuer 强制迁移后 demo 应用也必须有独立 slug，固定为 demo-app；
 	// 冲突处理交给 issuer_slug 唯一索引（demo-app 是保留给内置应用的固定值）。
 	_, _ = database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug)
 		VALUES (?, ?, 'OneAuth 内置体验应用', 'http://localhost:9000/demo/callback,http://127.0.0.1:9000/demo/callback', ?)
-		ON CONFLICT(client_id) DO UPDATE SET redirect_uris = excluded.redirect_uris, issuer_slug = excluded.issuer_slug
+		ON CONFLICT(client_id) DO UPDATE SET client_secret_hash = excluded.client_secret_hash, redirect_uris = excluded.redirect_uris, issuer_slug = excluded.issuer_slug
 	`, demoClientID, secretHash, demoIssuerSlug)
 }
 
@@ -375,14 +381,29 @@ func logTenantIssuers(port string) {
 		}
 		log.Printf("   - %s → http://localhost:%s/%s/.well-known/openid-configuration", name, port, slug)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[启动] 遍历应用 Issuer 列表异常: %v", err)
+	}
 	if !any {
 		log.Printf("   （暂无注册应用）")
 	}
 }
 
-// currentScheme 与 getBaseURL 同规则：反代告知 https 或原生 TLS 时用 https。
+func isTrustedProxy(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// currentScheme 与 getBaseURL 同规则：原生 TLS 或可信反代告知 https 时用 https。
 func currentScheme(r *http.Request) string {
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || (r.Header.Get("X-Forwarded-Proto") == "https" && isTrustedProxy(r.RemoteAddr)) {
 		return "https"
 	}
 	return "http"
@@ -396,12 +417,13 @@ var demoRedirectMu sync.Mutex
 // 列表。演示页的 redirect_uri 必须与浏览器实际地址一致 —— 否则核销后的
 // 授权码会被送到别处（例如用户本机也跑着一个 OneAuth 的 localhost:9000），
 // /token 换取时就会 invalid_grant。
+// 统一使用 WriteDB 避免 SQLite WAL 模式下只读连接读到滞后快照导致 URI 重复拼接。
 func registerDemoRedirectURI(callback string) {
 	demoRedirectMu.Lock()
 	defer demoRedirectMu.Unlock()
 
 	var uris string
-	if err := database.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE client_id = ?", demoClientID).Scan(&uris); err != nil {
+	if err := database.WriteDB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE client_id = ?", demoClientID).Scan(&uris); err != nil {
 		return
 	}
 	for _, uri := range strings.Split(uris, ",") {
@@ -652,15 +674,41 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	// 解析 JWT payload 展示 QQ 信息
 	var qqNumber string
 	if parts := strings.Split(idToken, "."); len(parts) >= 2 {
-		payloadBytes, _ := base64.RawURLEncoding.DecodeString(parts[1])
-		var claims map[string]interface{}
-		_ = json.Unmarshal(payloadBytes, &claims)
-		if sub, ok := claims["sub"].(string); ok {
-			qqNumber = sub
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err == nil {
+			var claims map[string]interface{}
+			if err := json.Unmarshal(payloadBytes, &claims); err == nil {
+				if sub, ok := claims["sub"].(string); ok {
+					qqNumber = sub
+				}
+			}
 		}
 	}
 	if qqNumber == "" {
-		qqNumber = "100000001"
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>身份解析失败 - 演示应用</title>
+    <style>
+        body { font-family: sans-serif; background: #060813; color: #94a3b8; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+        .box { background: rgba(19, 26, 53, 0.8); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 20px; padding: 40px; max-width: 500px; text-align: center; }
+        h1 { color: #f87171; }
+        a { display:inline-block; margin-top:20px; padding:10px 24px; background:#3b82f6; color:#fff; text-decoration:none; border-radius:8px; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>身份解析失败</h1>
+        <p>未能从签发的 ID Token 中解析出有效的 QQ 用户身份（sub claim 为空）。</p>
+        <a href="/demo">🔄 重新发起测试</a>
+    </div>
+</body>
+</html>`)
+		_, _ = w.Write([]byte(html))
+		return
 	}
 
 	avatarURL := fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", qqNumber)

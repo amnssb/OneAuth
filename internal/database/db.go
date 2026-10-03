@@ -123,6 +123,18 @@ func migrate() error {
 			issued_at INTEGER NOT NULL,
 			exp INTEGER NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS refresh_tokens (
+			token TEXT PRIMARY KEY,
+			client_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			scopes TEXT NOT NULL,
+			issuer_slug TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			expires_at DATETIME NOT NULL,
+			revoked INTEGER DEFAULT 0
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id, user_id);`,
 		`INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES
 			('site_name', '统一身份认证中心'),
 			('site_logo', ''),
@@ -188,12 +200,41 @@ func migrate() error {
 		return err
 	}
 
+	// 迁移 transient_sessions_backup 列
+	sessCols := map[string]bool{}
+	sessRows, err := WriteDB.Query("PRAGMA table_info(transient_sessions_backup)")
+	if err == nil {
+		for sessRows.Next() {
+			var cid int
+			var name, ctype string
+			var notNull, pk int
+			var dflt interface{}
+			if err := sessRows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err == nil {
+				sessCols[name] = true
+			}
+		}
+		sessRows.Close()
+	}
+	for _, col := range []string{"nonce", "scopes", "code_challenge_method", "issuer_slug"} {
+		if !sessCols[col] {
+			if _, err := WriteDB.Exec("ALTER TABLE transient_sessions_backup ADD COLUMN " + col + " TEXT"); err != nil {
+				return err
+			}
+		}
+	}
+	if !sessCols["auth_time"] {
+		if _, err := WriteDB.Exec("ALTER TABLE transient_sessions_backup ADD COLUMN auth_time INTEGER DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 // slugPattern 与管理后台创建/编辑应用时使用的校验规则保持一致：
 // 小写字母数字与短横线，2~32 个字符，首字符不能是短横线。
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,31}$`)
+var dashesPattern = regexp.MustCompile(`-+`)
 
 // reservedSlugs 是与现有路由字面量冲突或语义混淆的保留字，创建/回填
 // 时一律拒绝，防止 /{slug}/authorize 之类的通配路由抢占既有端点。
@@ -202,6 +243,7 @@ var reservedSlugs = map[string]bool{
 	"api": true, "ws": true, "authorize": true, "token": true,
 	"userinfo": true, "well-known": true, "callback": true,
 	"health": true, "assets": true, "oneauth": true,
+	"revoke": true, "introspect": true, "logout": true,
 }
 
 // ValidateSlug 校验管理后台传入的 issuer_slug 是否合法：格式符合
@@ -229,7 +271,7 @@ func sanitizeSlugSeed(seed string) string {
 			b.WriteByte('-')
 		}
 	}
-	out := regexp.MustCompile(`-+`).ReplaceAllString(b.String(), "-")
+	out := dashesPattern.ReplaceAllString(b.String(), "-")
 	out = strings.Trim(out, "-")
 	if len(out) > 28 {
 		out = out[:28]
@@ -261,6 +303,10 @@ func backfillIssuerSlugs() error {
 			continue
 		}
 		pending = append(pending, row{clientID: id})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 
@@ -307,6 +353,9 @@ func initSettingsCache() {
 			if err := rows.Scan(&k, &v); err == nil {
 				m[k] = v
 			}
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[DB] 设置缓存预热遍历异常: %v", err)
 		}
 		rows.Close()
 	} else {
@@ -464,14 +513,46 @@ func PurgeExpiredTenantKeys(slug string, grace time.Duration) error {
 	return err
 }
 
+var (
+	brandingMu    sync.RWMutex
+	brandingCache = make(map[string]map[string]string)
+)
+
+// InvalidateClientBranding 清理指定客户端或全量客户端的品牌覆盖缓存
+func InvalidateClientBranding(clientID string) {
+	brandingMu.Lock()
+	defer brandingMu.Unlock()
+	if clientID == "" {
+		brandingCache = make(map[string]map[string]string)
+	} else {
+		delete(brandingCache, clientID)
+	}
+}
+
 // GetClientBranding 返回一个 OIDC 客户端的登录页品牌覆盖与应用级验证群号
 // （target_group_id）；未设置的字段为空串，由调用方回落到全局设置。这让
 // 同一个 OneAuth 可以给多个接入项目呈现各自不同的登录页与核验群。
+// 内部使用带读写锁的内存缓存，避免高并发登录时打爆 SQLite。
 func GetClientBranding(clientID string) map[string]string {
-	out := map[string]string{"display_name": "", "background_url": "", "prompt_text": "", "custom_css": "", "target_group_id": ""}
-	if clientID == "" {
-		return out
+	defaultRes := func() map[string]string {
+		return map[string]string{"display_name": "", "background_url": "", "prompt_text": "", "custom_css": "", "target_group_id": ""}
 	}
+	if clientID == "" {
+		return defaultRes()
+	}
+
+	brandingMu.RLock()
+	if cached, ok := brandingCache[clientID]; ok {
+		brandingMu.RUnlock()
+		cp := make(map[string]string, len(cached))
+		for k, v := range cached {
+			cp[k] = v
+		}
+		return cp
+	}
+	brandingMu.RUnlock()
+
+	out := defaultRes()
 	row := DB.QueryRow(`
 		SELECT COALESCE(display_name, ''), COALESCE(background_url, ''),
 		       COALESCE(prompt_text, ''), COALESCE(custom_css, ''),
@@ -483,5 +564,72 @@ func GetClientBranding(clientID string) map[string]string {
 		out["prompt_text"], out["custom_css"] = pt, css
 		out["target_group_id"] = gid
 	}
-	return out
+
+	brandingMu.Lock()
+	brandingCache[clientID] = out
+	brandingMu.Unlock()
+
+	cp := make(map[string]string, len(out))
+	for k, v := range out {
+		cp[k] = v
+	}
+	return cp
 }
+
+// ---- Refresh Tokens ----
+
+type RefreshTokenRow struct {
+	Token      string
+	ClientID   string
+	UserID     string
+	Provider   string
+	Scopes     string
+	IssuerSlug string
+	CreatedAt  string
+	ExpiresAt  time.Time
+	Revoked    bool
+}
+
+func StoreRefreshToken(token, clientID, userID, provider, scopes, issuerSlug string, expiresAt time.Time) error {
+	_, err := WriteDB.Exec(`
+		INSERT INTO refresh_tokens (token, client_id, user_id, provider, scopes, issuer_slug, expires_at, revoked)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+	`, token, clientID, userID, provider, scopes, issuerSlug, expiresAt.UTC().Format("2006-01-02 15:04:05"))
+	return err
+}
+
+func GetRefreshToken(token string) (*RefreshTokenRow, error) {
+	var r RefreshTokenRow
+	var revokedInt int
+	var expiresAtStr string
+	err := DB.QueryRow(`
+		SELECT token, client_id, user_id, provider, scopes, issuer_slug, created_at, expires_at, revoked
+		FROM refresh_tokens WHERE token = ?
+	`, token).Scan(&r.Token, &r.ClientID, &r.UserID, &r.Provider, &r.Scopes, &r.IssuerSlug, &r.CreatedAt, &expiresAtStr, &revokedInt)
+	if err != nil {
+		return nil, err
+	}
+	t, _ := time.Parse("2006-01-02 15:04:05", expiresAtStr)
+	if t.IsZero() {
+		t, _ = time.Parse(time.RFC3339, expiresAtStr)
+	}
+	r.ExpiresAt = t
+	r.Revoked = (revokedInt != 0)
+	return &r, nil
+}
+
+func RevokeRefreshToken(token string) error {
+	_, err := WriteDB.Exec("UPDATE refresh_tokens SET revoked = 1 WHERE token = ?", token)
+	return err
+}
+
+func RevokeClientUserRefreshTokens(clientID, userID string) error {
+	_, err := WriteDB.Exec("UPDATE refresh_tokens SET revoked = 1 WHERE client_id = ? AND user_id = ?", clientID, userID)
+	return err
+}
+
+func DeleteExpiredRefreshTokens() error {
+	_, err := WriteDB.Exec("DELETE FROM refresh_tokens WHERE expires_at < CURRENT_TIMESTAMP OR revoked = 1")
+	return err
+}
+

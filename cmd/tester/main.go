@@ -9,22 +9,28 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-const (
-	wsToken     = "2rZY778PKgCO6ljZ"
-	targetGroup = 309623044
-	testQQ      = 100000001
-	// 默认打内置 demo 应用：它随服务启动固定存在，且带固定 issuer_slug，
-	// 让端到端冒烟无需先手动注册应用。可用环境变量覆盖成自建应用。
-	clientID     = "oneauth_demo_app"
-	clientSecret = "demo_secret_888888"
-	issuerSlug   = "demo-app"
-)
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+func getEnvInt64(key string, defaultVal int64) int64 {
+	if val := os.Getenv(key); val != "" {
+		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return n
+		}
+	}
+	return defaultVal
+}
 
 // oneAuthHost 可用环境变量 ONEAUTH_HOST 覆盖（默认 localhost:9000），
 // 便于在测试端口上冒烟。
@@ -36,6 +42,12 @@ func resolveHost() string {
 }
 
 func main() {
+	wsToken := getEnv("ONEAUTH_WS_TOKEN", "2rZY778PKgCO6ljZ")
+	targetGroup := getEnvInt64("ONEAUTH_TARGET_GROUP", 309623044)
+	testQQ := getEnvInt64("ONEAUTH_TEST_QQ", 100000001)
+	clientID := getEnv("ONEAUTH_CLIENT_ID", "oneauth_demo_app")
+	clientSecret := getEnv("ONEAUTH_CLIENT_SECRET", "demo_secret_888888")
+	issuerSlug := getEnv("ONEAUTH_ISSUER_SLUG", "demo-app")
 	oneAuthHost := resolveHost()
 	fmt.Println("==================================================")
 	fmt.Println("🚀 OneAuth 全链路端到端模拟核验测试")

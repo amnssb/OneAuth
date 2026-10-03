@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -41,14 +40,27 @@ type adminClaims struct {
 type adminSessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*adminClaims
+	stopChan chan struct{}
 }
 
 var adminStore = newAdminStore()
 
 func newAdminStore() *adminSessionStore {
-	s := &adminSessionStore{sessions: make(map[string]*adminClaims)}
+	s := &adminSessionStore{
+		sessions: make(map[string]*adminClaims),
+		stopChan: make(chan struct{}),
+	}
 	go s.janitor()
 	return s
+}
+
+// Close 停止后台 janitor 协程
+func (s *adminSessionStore) Close() {
+	select {
+	case <-s.stopChan:
+	default:
+		close(s.stopChan)
+	}
 }
 
 func (s *adminSessionStore) put(token string, claims *adminClaims) {
@@ -102,15 +114,20 @@ func (s *adminSessionStore) renew(token string, claim *adminClaims) {
 func (s *adminSessionStore) janitor() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now().Unix()
-		s.mu.Lock()
-		for token, claim := range s.sessions {
-			if now > claim.Exp {
-				delete(s.sessions, token)
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			now := time.Now().Unix()
+			s.mu.Lock()
+			for token, claim := range s.sessions {
+				if now > claim.Exp {
+					delete(s.sessions, token)
+				}
 			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }
 
@@ -176,6 +193,9 @@ func (s *adminSessionStore) restoreFromDB() (int, error) {
 		}
 		s.sessions[token] = &claim
 		restored++
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[无感更新] 恢复管理员会话遍历异常: %v", err)
 	}
 	if restored > 0 {
 		log.Printf("[无感更新] 已从备份成功恢复 %d 条管理员会话", restored)
@@ -614,38 +634,9 @@ func handlePreviewLogin(w http.ResponseWriter, r *http.Request) {
 
 // ---- 系统设置 ----
 
-var allowedSettings = map[string]bool{
-	"site_name":        true,
-	"prompt_text":      true,
-	"background_url":   true,
-	"custom_css":       true,
-	"target_group_id":  true,
-	"onebot_token":     true,
-	"code_ttl":         true,
-	"site_logo":        true,
-	"demo_enabled":     true,
-	"update_check_url": true,
-	"update_proxy":     true,
-}
-
-func settingLabel(key string) string {
-	labels := map[string]string{
-		"site_name":        "站点名称",
-		"prompt_text":      "提示文案",
-		"background_url":   "背景图 URL",
-		"custom_css":       "自定义 CSS",
-		"target_group_id":  "默认 QQ 群号",
-		"onebot_token":     "OneBot Token",
-		"code_ttl":         "验证码有效期",
-		"site_logo":        "站点 Logo URL",
-		"demo_enabled":     "内置体验应用开关",
-		"update_check_url": "更新检查地址",
-		"update_proxy":     "更新网络代理",
-	}
-	if l, ok := labels[key]; ok {
-		return l
-	}
-	return key
+type settingSpec struct {
+	Label    string
+	Validate func(label, val string) error
 }
 
 func checkLength(label, val string, maxRunes int) error {
@@ -655,75 +646,128 @@ func checkLength(label, val string, maxRunes int) error {
 	return nil
 }
 
+func validateURLOrEmpty(label, val string) error {
+	if val == "" {
+		return nil
+	}
+	if err := checkLength(label, val, 2048); err != nil {
+		return err
+	}
+	u, err := url.Parse(val)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return errors.New(label + " 必须是 http(s) 直链")
+	}
+	return nil
+}
+
+var systemSettingsSpecs = map[string]settingSpec{
+	"site_name": {
+		Label: "站点名称",
+		Validate: func(label, val string) error {
+			return checkLength(label, val, 100)
+		},
+	},
+	"prompt_text": {
+		Label: "提示文案",
+		Validate: func(label, val string) error {
+			return checkLength(label, val, 200)
+		},
+	},
+	"background_url": {
+		Label:    "背景图 URL",
+		Validate: validateURLOrEmpty,
+	},
+	"custom_css": {
+		Label: "自定义 CSS",
+		Validate: func(label, val string) error {
+			return checkLength(label, val, 64<<10)
+		},
+	},
+	"target_group_id": {
+		Label: "默认 QQ 群号",
+		Validate: func(label, val string) error {
+			if val == "" {
+				return nil
+			}
+			if _, err := strconv.ParseUint(val, 10, 64); err != nil {
+				return errors.New("QQ 群号必须是纯数字")
+			}
+			return nil
+		},
+	},
+	"onebot_token": {
+		Label: "OneBot Token",
+		Validate: func(label, val string) error {
+			return checkLength(label, val, 128)
+		},
+	},
+	"code_ttl": {
+		Label: "验证码有效期",
+		Validate: func(label, val string) error {
+			if val == "" {
+				return nil
+			}
+			if n, err := strconv.Atoi(val); err != nil || n < 10 || n > 3600 {
+				return errors.New("验证码有效期须为 10~3600 秒")
+			}
+			return nil
+		},
+	},
+	"site_logo": {
+		Label:    "站点 Logo URL",
+		Validate: validateURLOrEmpty,
+	},
+	"demo_enabled": {
+		Label: "内置体验应用开关",
+		Validate: func(label, val string) error {
+			if val != "true" && val != "false" {
+				return errors.New(label + " 只能为 true 或 false")
+			}
+			return nil
+		},
+	},
+	"update_check_url": {
+		Label:    "更新检查地址",
+		Validate: validateURLOrEmpty,
+	},
+	"update_proxy": {
+		Label: "更新网络代理",
+		Validate: func(label, val string) error {
+			if val == "" {
+				return nil
+			}
+			if err := checkLength(label, val, 1024); err != nil {
+				return err
+			}
+			u, err := url.Parse(val)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
+				return errors.New(label + " 必须是 http、https 或 socks5 代理地址")
+			}
+			return nil
+		},
+	},
+}
+
+var allowedSettings = func() map[string]bool {
+	m := make(map[string]bool, len(systemSettingsSpecs))
+	for k := range systemSettingsSpecs {
+		m[k] = true
+	}
+	return m
+}()
+
+func settingLabel(key string) string {
+	if spec, ok := systemSettingsSpecs[key]; ok {
+		return spec.Label
+	}
+	return key
+}
+
 // validateSetting 在写库前校验设置值：非法值此前会被静默保存，直到登录页
 // 或机器人处理链路上才以难以排查的方式失效。
 func validateSetting(key, val string) error {
-	switch key {
-	case "site_name":
-		return checkLength(settingLabel(key), val, 100)
-	case "prompt_text":
-		return checkLength(settingLabel(key), val, 200)
-	case "custom_css":
-		return checkLength(settingLabel(key), val, 64<<10)
-	case "onebot_token":
-		return checkLength(settingLabel(key), val, 128)
-	case "background_url", "site_logo":
-		if val == "" {
-			return nil
-		}
-		if err := checkLength(settingLabel(key), val, 2048); err != nil {
-			return err
-		}
-		u, err := url.Parse(val)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			return errors.New(settingLabel(key) + " 必须是 http(s) 直链")
-		}
-		return nil
-	case "update_check_url":
-		if val == "" {
-			return nil
-		}
-		if err := checkLength(settingLabel(key), val, 2048); err != nil {
-			return err
-		}
-		u, err := url.Parse(val)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			return errors.New(settingLabel(key) + " 必须是 http(s) 直链")
-		}
-		return nil
-	case "update_proxy":
-		if val == "" {
-			return nil
-		}
-		if err := checkLength(settingLabel(key), val, 1024); err != nil {
-			return err
-		}
-		u, err := url.Parse(val)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
-			return errors.New(settingLabel(key) + " 必须是 http、https 或 socks5 代理地址")
-		}
-		return nil
-	case "target_group_id":
-		if val == "" {
-			return nil
-		}
-		if _, err := strconv.ParseUint(val, 10, 64); err != nil {
-			return errors.New("QQ 群号必须是纯数字")
-		}
-		return nil
-	case "code_ttl":
-		if val == "" {
-			return nil
-		}
-		if n, err := strconv.Atoi(val); err != nil || n < 10 || n > 3600 {
-			return errors.New("验证码有效期须为 10~3600 秒")
-		}
-		return nil
-	case "demo_enabled":
-		if val != "true" && val != "false" {
-			return errors.New(settingLabel(key) + " 只能为 true 或 false")
-		}
-		return nil
+	if spec, ok := systemSettingsSpecs[key]; ok {
+		return spec.Validate(spec.Label, val)
 	}
 	return fmt.Errorf("不支持的设置项: %s", key)
 }
@@ -900,13 +944,14 @@ func validateClientRequest(req *clientRequest) error {
 	return nil
 }
 
-const clientColumns = `client_id, client_name, redirect_uris, created_at,
-	COALESCE(display_name, ''), COALESCE(background_url, ''),
-	COALESCE(prompt_text, ''), COALESCE(custom_css, ''),
-	COALESCE(target_group_id, ''), COALESCE(issuer_slug, '')`
+const clientColumns = `c.client_id, c.client_name, c.redirect_uris, c.created_at,
+	COALESCE(c.display_name, ''), COALESCE(c.background_url, ''),
+	COALESCE(c.prompt_text, ''), COALESCE(c.custom_css, ''),
+	COALESCE(c.target_group_id, ''), COALESCE(c.issuer_slug, ''),
+	COALESCE((SELECT kid FROM tenant_keys WHERE slug = c.issuer_slug AND retired_at IS NULL ORDER BY created_at DESC LIMIT 1), '')`
 
 func handleListClients(w http.ResponseWriter, r *http.Request) {
-	rows, err := database.DB.Query("SELECT " + clientColumns + " FROM oidc_clients ORDER BY created_at")
+	rows, err := database.DB.Query("SELECT " + clientColumns + " FROM oidc_clients c ORDER BY c.created_at")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Internal error")
 		return
@@ -918,17 +963,15 @@ func handleListClients(w http.ResponseWriter, r *http.Request) {
 		var c ClientInfo
 		if err := rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.CreatedAt,
 			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS,
-			&c.TargetGroupID, &c.IssuerSlug); err != nil {
+			&c.TargetGroupID, &c.IssuerSlug, &c.Kid); err != nil {
 			continue
 		}
-		// 附带当前在用签名密钥的 kid，供后台展示；没有则留空（应用刚建、
-		// 尚未签发过 token 时会惰性生成）。
-		if c.IssuerSlug != "" {
-			if key, ok := database.ActiveTenantKey(c.IssuerSlug); ok {
-				c.Kid = key.Kid
-			}
-		}
 		clients = append(clients, c)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[管理后台] 查询客户端列表异常: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal error")
+		return
 	}
 	writeJSON(w, http.StatusOK, clients)
 }
@@ -1003,10 +1046,15 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash := sha256.Sum256([]byte(clientSecret))
-	secretHash := base64.RawURLEncoding.EncodeToString(hash[:])
+	hashed, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("[管理后台] 生成 client_secret 哈希失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal error")
+		return
+	}
+	secretHash := string(hashed)
 
-	_, err := database.WriteDB.Exec(`
+	_, err = database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris,
 			display_name, background_url, prompt_text, custom_css, target_group_id, issuer_slug)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1017,6 +1065,7 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Internal error")
 		return
 	}
+	database.InvalidateClientBranding(clientID)
 
 	log.Printf("[管理后台] 创建 OIDC 客户端 %q (%s, issuer_slug=%s) ip=%s", req.ClientName, clientID, slug, clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -1061,6 +1110,7 @@ func handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "客户端不存在或已被移除")
 		return
 	}
+	database.InvalidateClientBranding(id)
 
 	log.Printf("[管理后台] 更新 OIDC 客户端 %s ip=%s", id, clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1082,6 +1132,7 @@ func handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "客户端不存在或已被移除")
 		return
 	}
+	database.InvalidateClientBranding(id)
 
 	log.Printf("[管理后台] 删除 OIDC 客户端 %s ip=%s", id, clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

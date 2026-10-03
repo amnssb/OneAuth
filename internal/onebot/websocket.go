@@ -1,6 +1,7 @@
 package onebot
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -255,8 +256,10 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if token != "" {
 		auth := r.Header.Get("Authorization")
 		queryToken := r.URL.Query().Get("access_token")
-		valid := auth == "Bearer "+token || queryToken == token
-		if !valid {
+		expectedAuth := "Bearer " + token
+		validAuth := subtle.ConstantTimeCompare([]byte(auth), []byte(expectedAuth)) == 1
+		validQuery := subtle.ConstantTimeCompare([]byte(queryToken), []byte(token)) == 1
+		if !validAuth && !validQuery {
 			log.Printf("[OneBot] 401 Unauthorized WS attempt from %s", r.RemoteAddr)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

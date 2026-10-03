@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"oneauth/internal/database"
 	"oneauth/internal/session"
@@ -306,3 +307,308 @@ func TestSessionStatusEndpoint(t *testing.T) {
 		t.Fatalf("unexpected redirect: %v", res2["redirect"])
 	}
 }
+
+// 统一根 Issuer 自动发现文档与 JWKS 测试
+func TestRootIssuerDiscoveryAndJWKS(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "root_disc.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	req.Host = "auth.example.com"
+	rec := httptest.NewRecorder()
+	handleRootDiscovery(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("root discovery status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode discovery: %v", err)
+	}
+	if cfg["issuer"] != "http://auth.example.com" {
+		t.Fatalf("root issuer must be root URL, got %v", cfg["issuer"])
+	}
+	if cfg["authorization_endpoint"] != "http://auth.example.com/authorize" {
+		t.Fatalf("unexpected authorization_endpoint: %v", cfg["authorization_endpoint"])
+	}
+	if cfg["token_endpoint"] != "http://auth.example.com/token" {
+		t.Fatalf("unexpected token_endpoint: %v", cfg["token_endpoint"])
+	}
+	if cfg["userinfo_endpoint"] != "http://auth.example.com/userinfo" {
+		t.Fatalf("unexpected userinfo_endpoint: %v", cfg["userinfo_endpoint"])
+	}
+	if cfg["end_session_endpoint"] != "http://auth.example.com/logout" {
+		t.Fatalf("unexpected end_session_endpoint: %v", cfg["end_session_endpoint"])
+	}
+	if cfg["revocation_endpoint"] != "http://auth.example.com/revoke" {
+		t.Fatalf("unexpected revocation_endpoint: %v", cfg["revocation_endpoint"])
+	}
+	if cfg["introspection_endpoint"] != "http://auth.example.com/introspect" {
+		t.Fatalf("unexpected introspection_endpoint: %v", cfg["introspection_endpoint"])
+	}
+
+	// 根 JWKS 端点
+	reqJWKS := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	recJWKS := httptest.NewRecorder()
+	handleRootJWKS(recJWKS, reqJWKS)
+	if recJWKS.Code != http.StatusOK {
+		t.Fatalf("root jwks status = %d", recJWKS.Code)
+	}
+	var jwks map[string]any
+	if err := json.Unmarshal(recJWKS.Body.Bytes(), &jwks); err != nil {
+		t.Fatalf("decode jwks: %v", err)
+	}
+	keys, ok := jwks["keys"].([]any)
+	if !ok || len(keys) == 0 {
+		t.Fatalf("root jwks must contain keys: %v", jwks)
+	}
+}
+
+// 授权端点：nonce 传递与 RFC 6749 规范重定向测试
+func TestAuthorizeNonceAndErrorRedirect(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "auth_nonce.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	setupTenantClient(t, "root_client", "secret123", "root-slug")
+
+	// 1. 成功授权并携带 nonce
+	req := httptest.NewRequest(http.MethodGet,
+		"/authorize?client_id=root_client&redirect_uri=http://cb.local/cb&response_type=code&scope=openid+profile&state=s1&nonce=n12345", nil)
+	rec := httptest.NewRecorder()
+	handleRootAuthorize(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize expected 302, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/login?session_id=") {
+		t.Fatalf("unexpected redirect: %s", loc)
+	}
+	sessionID := strings.TrimPrefix(loc, "/login?session_id=")
+	sess, ok := session.DefaultManager.GetSession(sessionID)
+	if !ok {
+		t.Fatalf("session not found: %s", sessionID)
+	}
+	if sess.Nonce != "n12345" {
+		t.Fatalf("expected nonce n12345, got %q", sess.Nonce)
+	}
+
+	// 2. 错误 response_type 时重定向到 redirect_uri?error=...
+	reqErr := httptest.NewRequest(http.MethodGet,
+		"/authorize?client_id=root_client&redirect_uri=http://cb.local/cb&response_type=token&scope=openid", nil)
+	recErr := httptest.NewRecorder()
+	handleRootAuthorize(recErr, reqErr)
+	if recErr.Code != http.StatusFound {
+		t.Fatalf("expected 302 error redirect, got %d", recErr.Code)
+	}
+	errLoc, _ := url.Parse(recErr.Header().Get("Location"))
+	if errLoc.Query().Get("error") != "unsupported_response_type" {
+		t.Fatalf("expected unsupported_response_type, got %v", errLoc.Query().Get("error"))
+	}
+}
+
+// 令牌签发：at_hash 校验、独立 Access Token 与 Refresh Token 流转测试
+func TestTokenIssuanceAtHashAndRefreshToken(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "token_flow.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	setupTenantClient(t, "flow_client", "secret_abc", "flow-app")
+
+	sess, err := session.DefaultManager.CreateSessionWithOptions(session.CreateSessionOptions{
+		ClientID:    "flow_client",
+		RedirectURI: "http://cb.local/cb",
+		State:       "state_xyz",
+		Nonce:       "custom_nonce_888",
+		Scopes:      []string{"openid", "profile", "email", "offline_access"},
+		GroupID:     "8888",
+		TTLSeconds:  60,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, ok := session.DefaultManager.VerifyCode("qq", sess.VerifyCode, "99999", "8888"); !ok {
+		t.Fatal("verify code failed")
+	}
+
+	authCode, _, ok := session.DefaultManager.IssueAuthCode(sess.SessionID)
+	if !ok {
+		t.Fatal("issue auth code failed")
+	}
+
+	// 1. authorization_code 兑换令牌
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {authCode},
+		"client_id":     {"flow_client"},
+		"client_secret": {"secret_abc"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handleRootToken(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleRootToken failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		IDToken      string `json:"id_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tokenResp); err != nil {
+		t.Fatalf("decode token resp: %v", err)
+	}
+
+	if tokenResp.AccessToken == "" || tokenResp.IDToken == "" || tokenResp.RefreshToken == "" {
+		t.Fatalf("missing tokens in response: %+v", tokenResp)
+	}
+	if tokenResp.AccessToken == tokenResp.IDToken {
+		t.Fatal("access_token and id_token must be distinct tokens")
+	}
+
+	// 校验 ID Token Claims 中的 nonce 与 at_hash
+	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(tokenResp.IDToken, ".")[1])
+	if err != nil {
+		t.Fatalf("decode id token payload: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(payload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id claims: %v", err)
+	}
+
+	if idClaims["nonce"] != "custom_nonce_888" {
+		t.Fatalf("expected nonce custom_nonce_888, got %v", idClaims["nonce"])
+	}
+	expectedAtHash := computeAtHash(tokenResp.AccessToken)
+	if idClaims["at_hash"] != expectedAtHash {
+		t.Fatalf("expected at_hash %s, got %v", expectedAtHash, idClaims["at_hash"])
+	}
+
+	// 2. 用 Refresh Token 换取新令牌
+	rfForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tokenResp.RefreshToken},
+		"client_id":     {"flow_client"},
+		"client_secret": {"secret_abc"},
+	}
+	reqRF := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(rfForm.Encode()))
+	reqRF.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recRF := httptest.NewRecorder()
+	handleRootToken(recRF, reqRF)
+	if recRF.Code != http.StatusOK {
+		t.Fatalf("refresh token failed: %d %s", recRF.Code, recRF.Body.String())
+	}
+
+	var rfResp struct {
+		AccessToken  string `json:"access_token"`
+		IDToken      string `json:"id_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(recRF.Body.Bytes(), &rfResp); err != nil {
+		t.Fatalf("decode rf resp: %v", err)
+	}
+	if rfResp.RefreshToken == "" || rfResp.RefreshToken == tokenResp.RefreshToken {
+		t.Fatalf("refresh token should be rotated: old=%s, new=%s", tokenResp.RefreshToken, rfResp.RefreshToken)
+	}
+
+	// 3. 旧 Refresh Token 再次使用必须失败（已被轮换吊销）
+	recReplay := httptest.NewRecorder()
+	reqReplay := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(rfForm.Encode()))
+	reqReplay.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleRootToken(recReplay, reqReplay)
+	if recReplay.Code != http.StatusBadRequest {
+		t.Fatalf("replayed refresh token must be rejected, got %d", recReplay.Code)
+	}
+}
+
+// 令牌撤销 (RFC 7009) 与令牌内省 (RFC 7662) 测试
+func TestRevokeAndIntrospect(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "revoke_intro.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	setupTenantClient(t, "ri_client", "ri_secret", "ri-app")
+
+	now := time.Now()
+	token := "sample_refresh_token_12345"
+	if err := database.StoreRefreshToken(token, "ri_client", "55555", "qq", "openid profile", "", now.Add(time.Hour)); err != nil {
+		t.Fatalf("store refresh token: %v", err)
+	}
+
+	// 1. 内省有效令牌
+	introForm := url.Values{
+		"token":         {token},
+		"client_id":     {"ri_client"},
+		"client_secret": {"ri_secret"},
+	}
+	reqIntro := httptest.NewRequest(http.MethodPost, "/introspect", strings.NewReader(introForm.Encode()))
+	reqIntro.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recIntro := httptest.NewRecorder()
+	handleRootIntrospect(recIntro, reqIntro)
+	if recIntro.Code != http.StatusOK {
+		t.Fatalf("introspect status = %d", recIntro.Code)
+	}
+	var introRes map[string]any
+	if err := json.Unmarshal(recIntro.Body.Bytes(), &introRes); err != nil {
+		t.Fatalf("decode introspect: %v", err)
+	}
+	if introRes["active"] != true || introRes["sub"] != "55555" {
+		t.Fatalf("expected active=true sub=55555, got %+v", introRes)
+	}
+
+	// 2. 撤销令牌 (RFC 7009)
+	revokeForm := url.Values{
+		"token":         {token},
+		"client_id":     {"ri_client"},
+		"client_secret": {"ri_secret"},
+	}
+	reqRevoke := httptest.NewRequest(http.MethodPost, "/revoke", strings.NewReader(revokeForm.Encode()))
+	reqRevoke.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recRevoke := httptest.NewRecorder()
+	handleRootRevoke(recRevoke, reqRevoke)
+	if recRevoke.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d", recRevoke.Code)
+	}
+
+	// 3. 再次内省该令牌，应为 active: false
+	recIntro2 := httptest.NewRecorder()
+	reqIntro2 := httptest.NewRequest(http.MethodPost, "/introspect", strings.NewReader(introForm.Encode()))
+	reqIntro2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleRootIntrospect(recIntro2, reqIntro2)
+	var introRes2 map[string]any
+	_ = json.Unmarshal(recIntro2.Body.Bytes(), &introRes2)
+	if introRes2["active"] != false {
+		t.Fatalf("revoked token must be inactive, got %+v", introRes2)
+	}
+}
+
+// RP-Initiated Logout 1.0 登出测试
+func TestRPInitiatedLogout(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/logout?post_logout_redirect_uri=http://app.local/goodbye&state=xyz", nil)
+	rec := httptest.NewRecorder()
+	handleRootLogout(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "http://app.local/goodbye?state=xyz" {
+		t.Fatalf("unexpected logout redirect: %s", loc)
+	}
+}
+
