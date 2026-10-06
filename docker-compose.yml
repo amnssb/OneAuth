@@ -19,6 +19,9 @@ services:
       - PORT=9000
       - DB_PATH=/data/oneauth.db
       - KEY_PATH=/data/oneauth_rsa.pem
+    extra_hosts:
+      - "api.github.com:140.82.112.5"
+      - "github.com:140.82.112.4"
     networks:
       - oneauth-net
 

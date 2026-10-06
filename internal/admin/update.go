@@ -161,7 +161,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		errStr := err.Error()
 		friendlyErr := "检查更新网络连接超时或离线"
 		if strings.Contains(errStr, "deadline exceeded") || strings.Contains(errStr, "Client.Timeout") || strings.Contains(errStr, "timeout") {
-			friendlyErr = "连接更新源超时（国内访问 GitHub 受限）。建议配置 HTTP/SOCKS5 代理或自定义镜像源"
+			friendlyErr = "连接更新源超时，建议检查服务器到 GitHub API 的网络连通性或配置代理"
 		} else if strings.Contains(errStr, "connectex") || strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no route to host") {
 			friendlyErr = "无法连通更新服务器（网络未连通或代理不可用）"
 		}
@@ -183,7 +183,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 			"has_update":      false,
 			"current_version": version.Version,
 			"latest_version":  version.Version,
-			"message":         "官方仓库暂未发布正式 Release 发行版，当前运行已是主干最新版本",
+			"message":         "官方仓库暂未发布正式 Release 发行包，当前运行已是主干最新版本",
 			"checked_at":      time.Now().Format(time.RFC3339),
 		})
 		return
