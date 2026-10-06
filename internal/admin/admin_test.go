@@ -367,3 +367,26 @@ func TestSecureHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleListAuditLogs(t *testing.T) {
+	if _, err := database.InitDB(filepath.Join(t.TempDir(), "admin_audit.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer database.WriteDB.Close()
+	defer database.DB.Close()
+
+	// 预写入审计数据
+	_ = database.RecordAuditLog("sess_1", "client_a", "123456", "1.1.1.1", "Mozilla/5.0", "Windows", "Chrome", "desktop")
+	_ = database.RecordAuditLog("sess_2", "client_b", "654321", "2.2.2.2", "Mozilla/5.0", "iOS", "Safari", "mobile")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audit-logs?qq=123456", nil)
+	rec := httptest.NewRecorder()
+	handleListAuditLogs(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"123456"`) || !strings.Contains(rec.Body.String(), `"1.1.1.1"`) {
+		t.Fatalf("expected audit log result in body, got %s", rec.Body.String())
+	}
+}

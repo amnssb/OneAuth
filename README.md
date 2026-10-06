@@ -377,6 +377,8 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
+    # 若上一层部署了 Cloudflare，透传 CF 注入的客户端真实 IP
+    proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
 
     # 1. 基础接口代理
     location / {

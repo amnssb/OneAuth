@@ -162,6 +162,14 @@ oneauth/
   - 创建应用时必填 `issuer_slug`（格式校验 + 保留字黑名单 + 唯一性校验，创建后不可变）。
   - 提供 `POST /api/admin/clients/{id}/rotate-key` 轮换该应用签名密钥；应用列表展示各应用 Issuer URL 与在用 kid。
   - 具备首次启动无账号时的引导注册逻辑 (`/api/admin/setup`)。
+  - **登录审计与设备关联**：新增 `GET /api/admin/audit-logs`，支持按 QQ 号与 IP 进行分页筛选查询。
+
+### 3.6 `internal/audit` (审计与设备指纹层)
+- **职责**: 透过 Cloudflare/反代精准收集用户真实 IP 与设备信息，并与 QQ 号强关联。
+- **关键设计**:
+  - **穿透 CF 获取真实 IP**：优先读取 `CF-Connecting-IP`，若无则依次降级读取 `True-Client-IP`、`X-Forwarded-For` 最左有效 IP 与 `RemoteAddr`。
+  - **设备环境解析**：解析 `User-Agent`，识别 OS（Windows/macOS/iOS/Android/Linux）、浏览器（Chrome/Edge/Safari/QQ App/微信等）以及设备类型（移动端/平板/桌面端/爬虫）。
+  - **原子生命周期联动**：用户发起授权 `/authorize` 时在会话状态机内记录网络与设备指纹；群内核销验证码成功时，异步持久化至 SQLite `auth_audit_logs` 表，完成 QQ 号与真实 IP/设备环境的绑定审计。
 
 ---
 

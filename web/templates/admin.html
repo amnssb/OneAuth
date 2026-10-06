@@ -932,6 +932,9 @@
                     <a onclick="switchNav(this, 'bot')">
                         <div class="nav-link-content"><span class="icon">🤖</span> OneBot 节点</div>
                     </a>
+                    <a onclick="switchNav(this, 'audit')">
+                        <div class="nav-link-content"><span class="icon">📋</span> 审计日志</div>
+                    </a>
                     <a onclick="switchNav(this, 'security')">
                         <div class="nav-link-content"><span class="icon">🛡️</span> 安全中心</div>
                     </a>
@@ -1367,7 +1370,66 @@
                 </div>
             </div>
 
-            <!-- 5. 安全中心页面 -->
+            <!-- 5. 审计日志页面 -->
+            <div id="page-audit" class="hidden">
+                <div class="page-header">
+                    <div class="page-header-text">
+                        <h2>📋 用户登录审计与设备关联</h2>
+                        <p>实时记录用户核销认证的 QQ 号、真实客户端 IP（穿透 Cloudflare）与设备操作系统及浏览器信息。</p>
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="fetchAuditLogs()">
+                            <span>🔄 刷新日志</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header" style="flex-wrap: wrap; gap: 12px;">
+                        <div class="card-title-box">
+                            <span class="card-icon">🔍</span>
+                            <div>
+                                <div class="card-title">日志筛选</div>
+                                <div class="card-desc">按 QQ 号或真实 IP 快速定位审计记录</div>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                            <input id="auditFilterQQ" type="text" placeholder="按 QQ 号过滤" style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--ai-border); background: var(--ai-field-bg); color: var(--ai-text); width: 140px;">
+                            <input id="auditFilterIP" type="text" placeholder="按 IP 过滤" style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--ai-border); background: var(--ai-field-bg); color: var(--ai-text); width: 140px;">
+                            <button class="btn btn-primary" onclick="fetchAuditLogs(0)">查询</button>
+                        </div>
+                    </div>
+                    <div class="table-container" style="overflow-x: auto;">
+                        <table class="data-table" style="width: 100%; border-collapse: collapse; text-align: left;">
+                            <thead>
+                                <tr style="border-bottom: 1px solid var(--ai-border); color: var(--ai-text-secondary); font-size: 13px;">
+                                    <th style="padding: 10px 14px;">时间</th>
+                                    <th style="padding: 10px 14px;">QQ 账号</th>
+                                    <th style="padding: 10px 14px;">真实客户端 IP</th>
+                                    <th style="padding: 10px 14px;">设备操作系统</th>
+                                    <th style="padding: 10px 14px;">浏览器</th>
+                                    <th style="padding: 10px 14px;">设备类型</th>
+                                    <th style="padding: 10px 14px;">客户端 ID</th>
+                                </tr>
+                            </thead>
+                            <tbody id="auditLogsBody">
+                                <tr>
+                                    <td colspan="7" style="text-align: center; padding: 24px; color: var(--ai-text-secondary);">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-size: 13px; color: var(--ai-text-secondary);">
+                        <span id="auditPaginationInfo">共 0 条</span>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-secondary" id="auditPrevBtn" onclick="prevAuditPage()" disabled>上一页</button>
+                            <button class="btn btn-secondary" id="auditNextBtn" onclick="nextAuditPage()" disabled>下一页</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 6. 安全中心页面 -->
             <div id="page-security" class="hidden">
                 <div class="page-header">
                     <div class="page-header-text">
@@ -1858,10 +1920,13 @@
         document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
         if (el) el.classList.add('active');
         showPage(pageName);
+        if (pageName === 'audit') {
+            fetchAuditLogs();
+        }
     }
 
     function showPage(name) {
-        const pages = ['overview', 'settings', 'clients', 'bot', 'security'];
+        const pages = ['overview', 'settings', 'clients', 'bot', 'audit', 'security'];
         pages.forEach(p => {
             const el = document.getElementById('page-' + p);
             if (el) el.classList.add('hidden');
@@ -2060,6 +2125,72 @@
         $('secretModal').classList.add('hidden');
         $('editModal').classList.add('hidden');
     });
+
+    // 审计日志分页状态
+    let auditCurrentOffset = 0;
+    const auditPageSize = 20;
+
+    async function fetchAuditLogs(offset = auditCurrentOffset) {
+        auditCurrentOffset = offset;
+        const qq = ($('auditFilterQQ') ? $('auditFilterQQ').value.trim() : '');
+        const ip = ($('auditFilterIP') ? $('auditFilterIP').value.trim() : '');
+        const tbody = $('auditLogsBody');
+        if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 24px; color: var(--ai-text-secondary);">加载中...</td></tr>';
+
+        try {
+            const params = new URLSearchParams({
+                limit: auditPageSize,
+                offset: auditCurrentOffset
+            });
+            if (qq) params.append('qq', qq);
+            if (ip) params.append('ip', ip);
+
+            const res = await apiFetch('/api/admin/audit-logs?' + params.toString());
+            const logs = res.logs || [];
+            const total = res.total || 0;
+
+            if (tbody) {
+                if (logs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 24px; color: var(--ai-text-secondary);">暂无审计日志</td></tr>';
+                } else {
+                    tbody.innerHTML = logs.map(l => {
+                        const devBadge = l.device_type === 'mobile' ? '📱 移动端' : (l.device_type === 'tablet' ? '📟 平板' : '💻 桌面端');
+                        return `
+                            <tr style="border-bottom: 1px solid var(--ai-border); font-size: 13px;">
+                                <td style="padding: 10px 14px; white-space: nowrap;">${l.created_at || '—'}</td>
+                                <td style="padding: 10px 14px;"><strong style="color: var(--ai-text);">${l.qq_number}</strong></td>
+                                <td style="padding: 10px 14px;"><code style="background: var(--ai-surface-container); padding: 2px 6px; border-radius: 4px;">${l.client_ip}</code></td>
+                                <td style="padding: 10px 14px;">${l.device_os || '未知'}</td>
+                                <td style="padding: 10px 14px;">${l.device_browser || '未知'}</td>
+                                <td style="padding: 10px 14px;">${devBadge}</td>
+                                <td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: var(--ai-text-secondary);">${l.client_id}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+            }
+
+            if ($('auditPaginationInfo')) {
+                const start = total === 0 ? 0 : auditCurrentOffset + 1;
+                const end = Math.min(auditCurrentOffset + logs.length, total);
+                $('auditPaginationInfo').innerText = `显示第 ${start} - ${end} 条，共 ${total} 条`;
+            }
+            if ($('auditPrevBtn')) $('auditPrevBtn').disabled = (auditCurrentOffset <= 0);
+            if ($('auditNextBtn')) $('auditNextBtn').disabled = (auditCurrentOffset + auditPageSize >= total);
+        } catch (e) {
+            if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 24px; color: var(--ai-danger);">加载失败: ${e.message}</td></tr>`;
+        }
+    }
+
+    function prevAuditPage() {
+        if (auditCurrentOffset >= auditPageSize) {
+            fetchAuditLogs(auditCurrentOffset - auditPageSize);
+        }
+    }
+
+    function nextAuditPage() {
+        fetchAuditLogs(auditCurrentOffset + auditPageSize);
+    }
 
     initCheck();
     </script>

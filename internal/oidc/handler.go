@@ -22,6 +22,7 @@ import (
 	jwtLib "github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 
+	"oneauth/internal/audit"
 	"oneauth/internal/database"
 	"oneauth/internal/identity"
 	"oneauth/internal/session"
@@ -410,6 +411,9 @@ func handleAuthorizeCore(w http.ResponseWriter, r *http.Request, slug, tenantCli
 
 	scopes := strings.Fields(scope)
 
+	clientIP := audit.ExtractClientIP(r)
+	devInfo := audit.ExtractDeviceInfo(r)
+
 	sess, err := session.DefaultManager.CreateSessionWithOptions(session.CreateSessionOptions{
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
@@ -421,6 +425,11 @@ func handleAuthorizeCore(w http.ResponseWriter, r *http.Request, slug, tenantCli
 		GroupID:             groupID,
 		IssuerSlug:          slug,
 		TTLSeconds:          ttl,
+		ClientIP:            clientIP,
+		UserAgent:           devInfo.UserAgent,
+		DeviceOS:            devInfo.OS,
+		DeviceBrowser:       devInfo.Browser,
+		DeviceType:          devInfo.DeviceType,
 	})
 	if err != nil {
 		http.Error(w, "server_error: 会话创建失败", http.StatusInternalServerError)

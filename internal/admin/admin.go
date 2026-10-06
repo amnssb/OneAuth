@@ -447,6 +447,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/update/check", SecureHeaders(authMiddleware(handleCheckUpdate)))
 	mux.HandleFunc("POST /api/admin/update/restart", SecureHeaders(authMiddleware(handleSeamlessRestart)))
 	mux.HandleFunc("POST /api/admin/update/apply", SecureHeaders(authMiddleware(handleApplyUpdate)))
+
+	// 审计日志接口
+	mux.HandleFunc("GET /api/admin/audit-logs", SecureHeaders(authMiddleware(handleListAuditLogs)))
 }
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
@@ -1197,3 +1200,37 @@ func randomToken(n int) string {
 func generateToken() string        { return randomToken(32) }
 func generateClientID() string     { return "oa_" + randomToken(12) }
 func generateClientSecret() string { return randomToken(32) }
+
+func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	qqFilter := q.Get("qq")
+	ipFilter := q.Get("ip")
+
+	limit := 50
+	if lStr := q.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	offset := 0
+	if oStr := q.Get("offset"); oStr != "" {
+		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	logs, total, err := database.ListAuditLogs(qqFilter, ipFilter, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "获取审计日志失败: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs":   logs,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+

@@ -135,6 +135,20 @@ func migrate() error {
 			revoked INTEGER DEFAULT 0
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id, user_id);`,
+		`CREATE TABLE IF NOT EXISTS auth_audit_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			qq_number TEXT NOT NULL,
+			client_ip TEXT NOT NULL,
+			user_agent TEXT,
+			device_os TEXT,
+			device_browser TEXT,
+			device_type TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_qq ON auth_audit_logs(qq_number);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_ip ON auth_audit_logs(client_ip);`,
 		`INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES
 			('site_name', '统一身份认证中心'),
 			('site_logo', ''),
@@ -632,4 +646,90 @@ func DeleteExpiredRefreshTokens() error {
 	_, err := WriteDB.Exec("DELETE FROM refresh_tokens WHERE expires_at < CURRENT_TIMESTAMP OR revoked = 1")
 	return err
 }
+
+// AuditLog 表示一条用户认证与设备关联日志
+type AuditLog struct {
+	ID            int64  `json:"id"`
+	SessionID     string `json:"session_id"`
+	ClientID      string `json:"client_id"`
+	QQNumber      string `json:"qq_number"`
+	ClientIP      string `json:"client_ip"`
+	UserAgent     string `json:"user_agent"`
+	DeviceOS      string `json:"device_os"`
+	DeviceBrowser string `json:"device_browser"`
+	DeviceType    string `json:"device_type"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// RecordAuditLog 记录一次 QQ 与客户端 IP/设备信息的关联审计日志
+func RecordAuditLog(sessionID, clientID, qqNumber, clientIP, userAgent, deviceOS, deviceBrowser, deviceType string) error {
+	if WriteDB == nil {
+		return nil
+	}
+	_, err := WriteDB.Exec(`
+		INSERT INTO auth_audit_logs (session_id, client_id, qq_number, client_ip, user_agent, device_os, device_browser, device_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, clientID, qqNumber, clientIP, userAgent, deviceOS, deviceBrowser, deviceType)
+	return err
+}
+
+// ListAuditLogs 分页查询审计记录，支持按 qq_number 和 client_ip 过滤
+func ListAuditLogs(qqFilter, ipFilter string, limit, offset int) ([]AuditLog, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	whereClauses := []string{"1=1"}
+	args := []interface{}{}
+
+	if strings.TrimSpace(qqFilter) != "" {
+		whereClauses = append(whereClauses, "qq_number = ?")
+		args = append(args, strings.TrimSpace(qqFilter))
+	}
+	if strings.TrimSpace(ipFilter) != "" {
+		whereClauses = append(whereClauses, "client_ip = ?")
+		args = append(args, strings.TrimSpace(ipFilter))
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM auth_audit_logs WHERE " + whereSQL
+	if err := DB.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, session_id, client_id, qq_number, client_ip, COALESCE(user_agent, ''), COALESCE(device_os, ''), COALESCE(device_browser, ''), COALESCE(device_type, ''), created_at
+		FROM auth_audit_logs
+		WHERE %s
+		ORDER BY id DESC
+		LIMIT ? OFFSET ?
+	`, whereSQL)
+
+	queryArgs := append(args, limit, offset)
+	rows, err := DB.Query(query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []AuditLog
+	for rows.Next() {
+		var l AuditLog
+		if err := rows.Scan(&l.ID, &l.SessionID, &l.ClientID, &l.QQNumber, &l.ClientIP, &l.UserAgent, &l.DeviceOS, &l.DeviceBrowser, &l.DeviceType, &l.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, l)
+	}
+
+	return list, total, nil
+}
+
 

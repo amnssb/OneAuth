@@ -36,6 +36,12 @@ type AuthSession struct {
 	// 必须与消息来源群号一致，否则拒绝核销。
 	GroupID    string
 	IssuerSlug string
+	// 设备与网络审计字段
+	ClientIP      string
+	UserAgent     string
+	DeviceOS      string
+	DeviceBrowser string
+	DeviceType    string
 	// 核销后的平台身份：Provider 标识来源平台（见 internal/identity），
 	// UserID 为该平台内的用户标识（qq 平台下即 QQ 号）。
 	// 核销前两者均为空。
@@ -144,6 +150,11 @@ type CreateSessionOptions struct {
 	GroupID             string
 	IssuerSlug          string
 	TTLSeconds          int
+	ClientIP            string
+	UserAgent           string
+	DeviceOS            string
+	DeviceBrowser       string
+	DeviceType          string
 }
 
 func (m *Manager) CreateSessionWithOptions(opts CreateSessionOptions) (*AuthSession, error) {
@@ -181,6 +192,11 @@ func (m *Manager) CreateSessionWithOptions(opts CreateSessionOptions) (*AuthSess
 			VerifyCode:          code,
 			GroupID:             opts.GroupID,
 			IssuerSlug:          opts.IssuerSlug,
+			ClientIP:            opts.ClientIP,
+			UserAgent:           opts.UserAgent,
+			DeviceOS:            opts.DeviceOS,
+			DeviceBrowser:       opts.DeviceBrowser,
+			DeviceType:          opts.DeviceType,
 			Status:              StatusPending,
 			ExpiresAt:           time.Now().Add(time.Duration(ttl) * time.Second),
 			NotifyChan:          make(chan struct{}),
@@ -240,6 +256,20 @@ func (m *Manager) VerifyCode(provider, code, userID, groupID string) (*AuthSessi
 
 	delete(m.codeIndex, code)
 	close(session.NotifyChan)
+
+	// 记录审计日志：关联真实 IP、设备信息与 QQ 号
+	go func(s AuthSession, uid string) {
+		_ = database.RecordAuditLog(
+			s.SessionID,
+			s.ClientID,
+			uid,
+			s.ClientIP,
+			s.UserAgent,
+			s.DeviceOS,
+			s.DeviceBrowser,
+			s.DeviceType,
+		)
+	}(*session, userID)
 
 	return session, true
 }
