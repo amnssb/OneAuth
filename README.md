@@ -317,7 +317,7 @@ cd OneAuth && git pull && docker compose up -d --build
 1. 点击 **网络配置** → **添加反向 WebSocket**。
 2. 填入参数：
    - **连接地址 (URL)**：`ws://oneauth:9000/ws/onebot`（⚠️ 注意：容器间通信直接写容器名 `oneauth` 即可，**不要**写 `localhost`）
-   - **Access Token**：填写在 OneAuth 控制台中设置的 `onebot_token`（如果设置了的话）
+   - **Access Token**：填写在 OneAuth 控制台中设置的 `onebot_token`（必填；未配置时启动会自动生成并打印到日志，空 Token 会被拒绝握手）
    - **重连时间**：`3000` 毫秒
 3. 保存并启用配置。
 
@@ -426,7 +426,7 @@ auth.yourdomain.com {
 1. 打开 NapCatQQ WebUI (`http://<ip>:6099`) 并登录机器人账号。
 2. 进入 **网络配置** → **添加反向 WebSocket 服务**：
    - **URL**: `ws://oneauth:9000/ws/onebot`（同容器网络）或 `ws://127.0.0.1:9000/ws/onebot`
-   - **Access Token**: 填写在 OneAuth 控制台设置的 `onebot_token`。
+   - **Access Token**: 填写在 OneAuth 控制台设置的 `onebot_token`（必填，空或历史公开默认值会被拒绝握手）。
    - **重连间隔**: `3000` ms。
 3. 保存后查看 OneAuth 管理后台系统概览，确认反向 WS 状态正常。
 4. 将机器人拉入目标 QQ 群，并在管理后台设置该群号。
@@ -488,13 +488,16 @@ auto_login = false
 ### 核心功能区说明：
 1. **系统概览**: 每 5 秒轮询 `/api/admin/stats`，展示真实服务运行时间、内存占用、已注册客户端数、内存登录会话分布与 OneBot 反向 WS 实时连接状态（在线/离线、最近事件）。
 2. **系统设置**: 自定义站点名称、群验证提示文案、背景图片直链及前台 CSS 样式（背景 URL 限 http/https、TTL 限 10~3600 秒，非法值会被拒绝并提示字段名）。
-3. **应用管理**: 注册/编辑/吊销 OIDC 应用凭证（Client Secret 仅创建时展示一次），回调地址逐条校验（完整 http(s) URL、无 # 片段）。支持**按应用覆盖登录页品牌**：登录页显示名、背景图、提示文案、自定义 CSS —— 多项目接入时各项目拥有自己的登录页，留空则继承全局设置。
-4. **OneBot 节点**: 配置目标核验群号、反向 WS 鉴权 Token 以及验证码 TTL，并在同一页面实时查看 NapCat 连接状态。
+3. **应用管理**: 注册/编辑/吊销 OIDC 应用凭证（Client Secret 仅创建时展示一次），回调地址逐条校验（完整 http(s) URL、无 # 片段）。另可按应用配置**登出跳转白名单** `post_logout_redirect_uris`（同样逐条校验 http(s)），留空则登出后只允许同源绝对地址或相对路径。支持**按应用覆盖登录页品牌**：登录页显示名、背景图、提示文案、自定义 CSS —— 多项目接入时各项目拥有自己的登录页，留空则继承全局设置。
+4. **OneBot 节点**: 配置目标核验群号、反向 WS 鉴权 Token 以及验证码 TTL，并在同一页面实时查看 NapCat 连接状态。Token 留空或为历史公开默认值时启动会自动生成随机值（空 Token 不再放行连接）；可选填来源 IP / CIDR 白名单，可选开启“核销前二次核验发送者是否仍在目标群”（fail-closed）。
 5. **安全中心**: 修改管理员密码（成功后其它已登录会话全部吊销）；「退出登录」会在服务端立即吊销当前会话。
 
 ### 安全机制：
-- 登录接口按来源 IP 限速：5 分钟内失败 5 次即锁定 15 分钟（返回 429 与 Retry-After）。
+- 登录接口按**来源 IP 与账号双维度**限速：5 分钟内失败 5 次即锁定 15 分钟（返回 429 与 Retry-After），拿不到可信反代头时只按来源 IP 限速，避免共享出口互相牵连。
 - 管理会话滑动续期（24 小时无操作才过期），全部管理 API 响应带 `no-store` 与 `X-Frame-Options: DENY` 等安全头，请求体上限 1 MiB。
+- `/logout` 的 `post_logout_redirect_uri` 必须命中应用登记的白名单，未登记时仅放行同源绝对地址与相对路径，且 `id_token_hint` 必须验签通过才采信。
+- 管理台与登录页下发基于渲染结果哈希的严格 CSP（`script-src 'self' 'unsafe-hashes'`），不使用全站 `'unsafe-inline'`；审计日志等自定义渲染字段统一 HTML 转义。
+- 二进制无感更新强制校验 `checksum`（sha256），缺失或不匹配一律 400 并清理临时文件。
 
 ---
 
@@ -507,7 +510,7 @@ auto_login = false
 ### Q2: 群内发送验证码后，前端页面没有跳转？
 1. **检查群号**: 确认用户发送消息的 QQ 群号与管理后台设置的 `target_group_id` 完全一致。
 2. **检查 Bot 日志**: 确认 NapCat 反向 WebSocket 是否已成功连接到 `/ws/onebot`，并有消息上报日志。
-3. **检查 Token**: 如果配置了 `onebot_token`，确保 NapCat 的 WS 握手 URL 或 Header 正确携带该凭证。
+3. **检查 Token**: `onebot_token` 现在必填 —— 未配置或仍为历史公开默认值时服务启动会自动生成随机 Token 并写入日志，空 Token 直接拒绝握手（503）。让 NapCat 的 WS 握手 URL 或 Header 携带该 Token；若已配置 `onebot_ws_ip_allowlist`，确认来源 IP 落在白名单内。
 4. **检查反代缓冲**: Nginx 反代环境下必须确认 `proxy_buffering off;`，否则 SSE 推送事件会被 Nginx 缓存而无法即时到达前端。
 
 ### Q3: 业务系统报错“Token 校验失败”？

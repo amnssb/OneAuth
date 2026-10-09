@@ -354,13 +354,19 @@ func handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	if expectedChecksum == "" {
 		expectedChecksum = strings.TrimSpace(r.FormValue("sha256"))
 	}
-	if expectedChecksum != "" {
-		if subtle.ConstantTimeCompare([]byte(strings.ToLower(expectedChecksum)), []byte(strings.ToLower(computedSha256))) != 1 {
-			tempFile.Close()
-			_ = os.Remove(tempPath)
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("文件 SHA-256 校验失败：期望 %s，实际 %s", expectedChecksum, computedSha256))
-			return
-		}
+	// 校验值必填：checksum 可选时，任何拿到管理会话的调用方都能上传任意
+	// 二进制直接覆盖主程序，发布包完整性形同虚设。
+	if expectedChecksum == "" {
+		tempFile.Close()
+		_ = os.Remove(tempPath)
+		writeError(w, http.StatusBadRequest, "缺少发布包 SHA-256 校验值（checksum/sha256），拒绝应用未校验的更新包")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(expectedChecksum)), []byte(strings.ToLower(computedSha256))) != 1 {
+		tempFile.Close()
+		_ = os.Remove(tempPath)
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("文件 SHA-256 校验失败：期望 %s，实际 %s", expectedChecksum, computedSha256))
+		return
 	}
 
 	// 校验二进制文件的格式（至少 4 字节魔数），防止上传非执行文件、空文件或损坏脚本覆盖主程序
@@ -403,9 +409,9 @@ func handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":  true,
-		"message":  "新版本二进制已成功就绪，正在无感平滑切换...",
-		"sha256":   computedSha256,
+		"success": true,
+		"message": "新版本二进制已成功就绪，正在无感平滑切换...",
+		"sha256":  computedSha256,
 	})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()

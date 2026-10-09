@@ -14,6 +14,8 @@ import (
 
 	"oneauth/internal/database"
 	"oneauth/internal/session"
+
+	jwtLib "github.com/golang-jwt/jwt/v5"
 )
 
 // 端到端回归：QQ 身份核销后 /token 签发的 JWT 必须保持既有 sub 语义
@@ -598,17 +600,175 @@ func TestRevokeAndIntrospect(t *testing.T) {
 	}
 }
 
-// RP-Initiated Logout 1.0 登出测试
+// RP-Initiated Logout 1.0 登出测试：跳转目标必须命中应用预注册的
+// post_logout_redirect_uris 白名单，或退回同源/相对路径，绝不因为
+// “scheme 是 http(s)”就外跳（开放重定向）。
 func TestRPInitiatedLogout(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/logout?post_logout_redirect_uri=http://app.local/goodbye&state=xyz", nil)
-	rec := httptest.NewRecorder()
-	handleRootLogout(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("expected 302 redirect, got %d", rec.Code)
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "logout.db")); err != nil {
+		t.Fatalf("init db: %v", err)
 	}
-	loc := rec.Header().Get("Location")
-	if loc != "http://app.local/goodbye?state=xyz" {
+	t.Cleanup(func() { database.WriteDB.Close(); database.DB.Close() })
+
+	setupTenantClient(t, "logout_client", "logout_secret", "logout-tenant")
+	if _, err := database.WriteDB.Exec(
+		"UPDATE oidc_clients SET post_logout_redirect_uris = ? WHERE client_id = ?",
+		"http://app.local/goodbye", "logout_client",
+	); err != nil {
+		t.Fatalf("set post-logout whitelist: %v", err)
+	}
+
+	tenantLogout := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.SetPathValue("slug", "logout-tenant")
+		rec := httptest.NewRecorder()
+		handleTenantLogout(rec, req)
+		return rec
+	}
+	rootLogout := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handleRootLogout(rec, req)
+		return rec
+	}
+
+	// 1. 命中白名单：照常 302 并保留 state
+	rec := tenantLogout("/logout-tenant/logout?post_logout_redirect_uri=http://app.local/goodbye&state=xyz")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("registered URI: expected 302, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "http://app.local/goodbye?state=xyz" {
 		t.Fatalf("unexpected logout redirect: %s", loc)
+	}
+
+	// 2. 白名单外的外部站点：绝不外跳（渲染登出页 200）
+	for _, evil := range []string{
+		"https://evil.com/pwn",
+		"http://app.local/goodbye.evil.com",
+		"https://app.local@evil.com/",
+		"//evil.com/pwn",
+	} {
+		rec := tenantLogout("/logout-tenant/logout?post_logout_redirect_uri=" + url.QueryEscape(evil))
+		if rec.Code == http.StatusFound {
+			t.Fatalf("unregistered URI %q must not redirect, got Location=%s", evil, rec.Header().Get("Location"))
+		}
+	}
+
+	// 3. 根端点未注册白名单：只放行相对路径与同源地址
+	if rec := rootLogout("/logout?post_logout_redirect_uri=%2Fbye&state=s1"); rec.Code != http.StatusFound {
+		t.Fatalf("relative path: expected 302, got %d", rec.Code)
+	} else if loc := rec.Header().Get("Location"); loc != "/bye?state=s1" {
+		t.Fatalf("unexpected relative redirect: %s", loc)
+	}
+	if rec := rootLogout("/logout?post_logout_redirect_uri=" + url.QueryEscape("http://example.com/bye")); rec.Code != http.StatusFound {
+		t.Fatalf("same-origin absolute URI: expected 302, got %d", rec.Code)
+	}
+	if rec := rootLogout("/logout?post_logout_redirect_uri=" + url.QueryEscape("http://app.local/goodbye")); rec.Code == http.StatusFound {
+		t.Fatalf("root endpoint must not honor another host's URI, got %s", rec.Header().Get("Location"))
 	}
 }
 
+// 伪造的 id_token_hint（alg 非 RSA / 验签不过）不得被采信为客户端身份，
+// 否则任何人都能凭一个自签 token 解锁白名单或注销他人 refresh token。
+func TestLogoutRejectsUnverifiedIDTokenHint(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "hint.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { database.WriteDB.Close(); database.DB.Close() })
+
+	setupTenantClient(t, "hint_client", "hint_secret", "hint-tenant")
+	if _, err := database.WriteDB.Exec(
+		"UPDATE oidc_clients SET post_logout_redirect_uris = ? WHERE client_id = ?",
+		"http://app.local/goodbye", "hint_client",
+	); err != nil {
+		t.Fatalf("set post-logout whitelist: %v", err)
+	}
+
+	// alg=HS256 的伪造 hint：声称自己属于 hint_client
+	forged, err := jwtLib.NewWithClaims(jwtLib.SigningMethodHS256, jwtLib.MapClaims{
+		"aud": "hint_client",
+		"sub": "10001",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString([]byte("public-key-as-hmac-secret"))
+	if err != nil {
+		t.Fatalf("sign forged hint: %v", err)
+	}
+
+	target := "/logout?post_logout_redirect_uri=" + url.QueryEscape("http://app.local/goodbye") +
+		"&id_token_hint=" + url.QueryEscape(forged)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	rec := httptest.NewRecorder()
+	handleRootLogout(rec, req)
+	if rec.Code == http.StatusFound {
+		t.Fatalf("forged hint must not unlock whitelist, got Location=%s", rec.Header().Get("Location"))
+	}
+}
+
+// demo_enabled 关闭时，内置 Demo 应用的 /authorize 与 /token 必须一并停用：
+// 只关 /demo 页面并不代表端点不可用（否则公开的默认 client_secret 仍能走完整授权流程）。
+func TestDemoClientEndpointsHonorSwitch(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "demo.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() {
+		database.WriteDB.Close()
+		database.DB.Close()
+		_ = database.SetSetting("demo_enabled", "true")
+	})
+
+	hash := sha256.Sum256([]byte("demo_secret"))
+	if _, err := database.WriteDB.Exec(
+		"INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, issuer_slug) VALUES (?, ?, ?, ?, ?)",
+		DemoClientID, base64.RawURLEncoding.EncodeToString(hash[:]), "demo",
+		"http://localhost:9000/demo/callback", "demo-app",
+	); err != nil {
+		t.Fatalf("insert demo client: %v", err)
+	}
+
+	authorize := func() int {
+		target := "/demo-app/authorize?client_id=" + DemoClientID +
+			"&redirect_uri=" + url.QueryEscape("http://localhost:9000/demo/callback") +
+			"&response_type=code&scope=openid"
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.SetPathValue("slug", "demo-app")
+		rec := httptest.NewRecorder()
+		handleTenantAuthorize(rec, req)
+		return rec.Code
+	}
+	token := func() int {
+		form := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {"unused"},
+			"client_id":     {DemoClientID},
+			"client_secret": {"demo_secret"},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/demo-app/token", strings.NewReader(form.Encode()))
+		req.SetPathValue("slug", "demo-app")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		handleTenantToken(rec, req)
+		return rec.Code
+	}
+
+	if err := database.SetSetting("demo_enabled", "false"); err != nil {
+		t.Fatalf("disable demo: %v", err)
+	}
+	if code := authorize(); code != http.StatusNotFound {
+		t.Fatalf("demo /authorize must be 404 when disabled, got %d", code)
+	}
+	if code := token(); code != http.StatusNotFound {
+		t.Fatalf("demo /token must be 404 when disabled, got %d", code)
+	}
+
+	if err := database.SetSetting("demo_enabled", "true"); err != nil {
+		t.Fatalf("enable demo: %v", err)
+	}
+	if code := authorize(); code != http.StatusFound {
+		t.Fatalf("demo /authorize must work when enabled, got %d", code)
+	}
+	if code := token(); code == http.StatusNotFound {
+		t.Fatalf("demo /token must not be 404 when enabled, got %d", code)
+	}
+}

@@ -28,6 +28,14 @@ import (
 	"oneauth/internal/session"
 )
 
+// DemoClientID 是内置 Demo 应用的固定 client_id，cmd/server 用同一个常量
+// 写库；demo_enabled 关闭时它的 /authorize 与 /token 一并停用。
+const DemoClientID = "oneauth_demo_app"
+
+func demoDisabled() bool {
+	return database.GetSetting("demo_enabled", "true") != "true"
+}
+
 // InitKeys 保留为兼容旧调用入口的空操作：签名密钥由 SQLite 惰性加载/生成，
 // 统一根 Issuer 与各租户 Issuer 分别拥有持久化 RSA-2048 密钥对。
 func InitKeys(keyPath string) {
@@ -373,6 +381,13 @@ func handleAuthorizeCore(w http.ResponseWriter, r *http.Request, slug, tenantCli
 		return
 	}
 
+	// demo_enabled 关闭时，内置 Demo 应用的授权端点一并停用：仅关掉 /demo
+	// 页面并不代表 /{slug}/authorize 与 /token 不可用。
+	if clientID == DemoClientID && demoDisabled() {
+		http.NotFound(w, r)
+		return
+	}
+
 	// 租户隔离校验：仅在租户端点时校验 client_id 必须与该 slug 绑定的应用一致
 	if slug != "" && tenantClientID != "" && clientID != tenantClientID {
 		http.Error(w, "unauthorized_client: client_id 与该 Issuer 不匹配", http.StatusForbidden)
@@ -476,6 +491,11 @@ func handleTokenCore(w http.ResponseWriter, r *http.Request, slug, tenantClientI
 			clientID = bID
 			clientSecret = bSec
 		}
+	}
+
+	if clientID == DemoClientID && demoDisabled() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "invalid_client"})
+		return
 	}
 
 	switch grantType {
@@ -970,14 +990,72 @@ func handleTenantIntrospect(w http.ResponseWriter, r *http.Request) {
 	handleIntrospectCore(w, r, slug)
 }
 
+// audToString 兼容 aud 的字符串与数组两种声明形态，返回首个受众。
+func audToString(v interface{}) string {
+	switch a := v.(type) {
+	case string:
+		return a
+	case []interface{}:
+		for _, item := range a {
+			if s, ok := item.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// isAllowedPostLogoutRedirect 判定登出后的跳转目标是否可信（RP-Initiated
+// Logout 1.0 要求 post_logout_redirect_uri 预注册）。判定顺序：
+//  1. 相对路径且非协议相对（//evil.com）：等价于本站跳转，放行；
+//  2. 应用注册过 post_logout_redirect_uris 白名单：必须精确匹配其一；
+//  3. 未注册白名单（存量应用兜底）：仅允许同源绝对地址。
+//
+// 只校验 scheme 为 http/https 是不够的 —— 那等于把任何外部站点变成
+// 可被本服务 302 的开放跳转板（钓鱼 / OAuth token 中转）。
+func isAllowedPostLogoutRedirect(r *http.Request, slug, hintClientID, uri string) bool {
+	u, err := url.Parse(strings.TrimSpace(uri))
+	if err != nil || u.Opaque != "" || u.User != nil || u.Fragment != "" {
+		return false
+	}
+
+	if u.Scheme == "" && u.Host == "" {
+		// "/path" 放行；"//host/path"（协议相对）与 "javascript:" 已在上面排除
+		return strings.HasPrefix(u.Path, "/") && !strings.HasPrefix(u.Path, "//")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+
+	clientID := hintClientID
+	if clientID == "" && slug != "" {
+		clientID, _ = database.ClientIDForSlug(slug)
+	}
+	for _, allowed := range database.ClientPostLogoutURIs(clientID) {
+		if allowed == uri {
+			return true
+		}
+		if au, err := url.Parse(allowed); err == nil && au.String() == u.String() {
+			return true
+		}
+	}
+	return u.Host == r.Host
+}
+
 // handleLogoutCore 实现 OIDC RP-Initiated Logout 1.0 登出端点
 func handleLogoutCore(w http.ResponseWriter, r *http.Request, slug string) {
 	postLogoutURI := r.URL.Query().Get("post_logout_redirect_uri")
 	state := r.URL.Query().Get("state")
 	idTokenHint := r.URL.Query().Get("id_token_hint")
 
+	hintClientID := ""
 	if idTokenHint != "" {
-		token, _ := jwtLib.Parse(idTokenHint, func(t *jwtLib.Token) (interface{}, error) {
+		token, err := jwtLib.Parse(idTokenHint, func(t *jwtLib.Token) (interface{}, error) {
+			// 只接受本服务 RSA 签发的令牌：不校验 alg 时 HS256 可拿公钥当
+			// 共享密钥伪造，等价于绕过签名验证。
+			if _, ok := t.Method.(*jwtLib.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected alg")
+			}
 			kidVal, _ := t.Header["kid"].(string)
 			pub, found := tenantPublicKeyByKid(slug, kidVal)
 			if !found {
@@ -985,20 +1063,24 @@ func handleLogoutCore(w http.ResponseWriter, r *http.Request, slug string) {
 			}
 			return pub, nil
 		})
-		if token != nil {
+		// 必须验签通过才采信其中的 aud/sub：否则任何人都能用未签名的
+		// 伪造 hint 注销任意应用的 refresh token，或伪造客户端身份换取
+		// 更宽松的登出跳转白名单。
+		if err == nil && token != nil && token.Valid {
 			if claims, ok := token.Claims.(jwtLib.MapClaims); ok {
 				sub, _ := claims["sub"].(string)
-				aud, _ := claims["aud"].(string)
+				aud := audToString(claims["aud"])
 				if sub != "" && aud != "" {
 					_ = database.RevokeClientUserRefreshTokens(aud, sub)
 				}
+				hintClientID = aud
 			}
 		}
 	}
 
 	if postLogoutURI != "" {
-		u, err := url.Parse(postLogoutURI)
-		if err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		if isAllowedPostLogoutRedirect(r, slug, hintClientID, postLogoutURI) {
+			u, _ := url.Parse(postLogoutURI)
 			if state != "" {
 				q := u.Query()
 				q.Set("state", state)
@@ -1007,6 +1089,8 @@ func handleLogoutCore(w http.ResponseWriter, r *http.Request, slug string) {
 			http.Redirect(w, r, u.String(), http.StatusFound)
 			return
 		}
+		log.Printf("[登出] 拒绝未注册的 post_logout_redirect_uri: %q (slug=%q client=%q ip=%s)",
+			postLogoutURI, slug, hintClientID, r.RemoteAddr)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

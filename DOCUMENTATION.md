@@ -49,7 +49,7 @@ OneAuth 旨在解决中小型私有 Web 应用（如 Gitea, Nextcloud, Grafana �
 |                                                                                         |
 |  [ 持久化层 (SQLite WAL) ]                                                              |
 |  - system_settings: 站点名、背景壁纸、自定义 CSS、目标群号、Bot 连接 Token、TTL          |
-|  - oidc_clients: client_id、client_secret_hash、回调地址白名单、issuer_slug             |
+|  - oidc_clients: client_id、client_secret_hash、回调地址白名单、登出跳转白名单、issuer_slug   |
 |  - tenant_keys: 每个 issuer_slug 独立的 RSA 签名密钥历史（含轮换宽限期）                 |
 |  - admin_users: 管理员用户名与 bcrypt 密码哈希                                          |
 +-----------------------------------------------------------------------------------------+

@@ -1,7 +1,9 @@
 package database
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"regexp"
@@ -63,6 +65,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	}
 
 	initSettingsCache()
+	ensureOnebotToken()
 
 	log.Printf("Database initialized successfully (WAL, read pool: %d conns, write pool: 1 conn)", readConns)
 	return reader, nil
@@ -155,7 +158,7 @@ func migrate() error {
 			('background_url', 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=1920&q=80'),
 			('custom_css', ''),
 			('target_group_id', '87654321'),
-			('onebot_token', 'oneauth_secure_secret_token'),
+			('onebot_token', ''),
 			('code_ttl', '180'),
 			('demo_enabled', 'true'),
 			('update_check_url', 'https://api.github.com/repos/amnssb/OneAuth/releases/latest'),
@@ -188,7 +191,7 @@ func migrate() error {
 	}
 	colRows.Close()
 
-	for _, col := range []string{"display_name", "background_url", "prompt_text", "custom_css", "target_group_id"} {
+	for _, col := range []string{"display_name", "background_url", "prompt_text", "custom_css", "target_group_id", "post_logout_redirect_uris"} {
 		if !existing[col] {
 			if _, err := WriteDB.Exec("ALTER TABLE oidc_clients ADD COLUMN " + col + " TEXT"); err != nil {
 				return err
@@ -409,6 +412,62 @@ func SetSetting(key, val string) error {
 	}
 	settingsMu.Unlock()
 	return nil
+}
+
+// legacyOnebotTokens 是历史版本随源码公开的默认 OneBot Token，等同于
+// 没有任何口令：命中即视为“未配置”，启动时轮换为随机强密钥。
+var legacyOnebotTokens = map[string]bool{
+	"oneauth_secure_secret_token": true,
+}
+
+// ensureOnebotToken 保证反向 WS 口令始终是高熵随机值：空值与历史公开
+// 默认值都会被替换成 32 字节随机 Token（fail-closed 的前提，否则空
+// Token 会让 /ws/onebot 对公网完全敞开）。
+func ensureOnebotToken() {
+	current := strings.TrimSpace(GetSetting("onebot_token", ""))
+	if current != "" && !legacyOnebotTokens[current] {
+		return
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("[OneBot] 生成随机 onebot_token 失败: %v", err)
+		return
+	}
+	fresh := base64.RawURLEncoding.EncodeToString(buf)
+	if err := SetSetting("onebot_token", fresh); err != nil {
+		log.Printf("[OneBot] 写入随机 onebot_token 失败: %v", err)
+		return
+	}
+	log.Printf("[OneBot] onebot_token 为空或为历史公开默认值，已自动生成随机 Token: %s（请同步更新机器人反向 WS 配置）", fresh)
+}
+
+// SplitURIList 拆逗号分隔的 URI 列表，供回调地址与登出白名单共用。
+func SplitURIList(raw string) []string {
+	out := []string{}
+	for _, item := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(item); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// ClientPostLogoutURIs 返回应用注册的登出跳转白名单（RP-Initiated Logout
+// 的 post_logout_redirect_uris）。返回空切片表示未注册：此时登出只允许
+// 同源或相对路径跳转，绝不因“仅校验了 scheme”而放行外部站点。
+func ClientPostLogoutURIs(clientID string) []string {
+	if clientID == "" {
+		return nil
+	}
+	var raw string
+	err := DB.QueryRow(
+		"SELECT COALESCE(post_logout_redirect_uris, '') FROM oidc_clients WHERE client_id = ?",
+		clientID,
+	).Scan(&raw)
+	if err != nil {
+		return nil
+	}
+	return SplitURIList(raw)
 }
 
 // ---- 多 Issuer / issuer_slug ----
@@ -731,5 +790,3 @@ func ListAuditLogs(qqFilter, ipFilter string, limit, offset int) ([]AuditLog, in
 
 	return list, total, nil
 }
-
-

@@ -185,4 +185,3 @@ func TestHandleCheckUpdate(t *testing.T) {
 		t.Errorf("expected rate limit error message, got %v", res403["error"])
 	}
 }
-

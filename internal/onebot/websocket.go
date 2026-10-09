@@ -1,12 +1,15 @@
 package onebot
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -23,7 +26,20 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+// CheckOrigin 只放行同源或不带 Origin 的非浏览器客户端（NapCat、
+// Go-cqhttp 这类反向 WS 发起方不会带 Origin）。原来无条件 return true
+// 等于允许任意网页在访客浏览器里借用户的网络位置连上这条 WS。
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}}
 
 var codeRegex = regexp.MustCompile("^[2-9A-HJ-NP-Z]{6}$")
 
@@ -51,10 +67,119 @@ type wsClient struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	isV12   atomic.Bool
+
+	// 成员二次核验的动作回包路由：每个动作请求带独立 echo，回包按 echo
+	// 分发回等待中的调用方，与事件通道互不干扰。
+	pendingMu sync.Mutex
+	pending   map[string]chan map[string]interface{}
+	echoSeq   atomic.Uint64
 }
 
 func newWSClient(conn *websocket.Conn) *wsClient {
-	return &wsClient{conn: conn}
+	return &wsClient{conn: conn, pending: make(map[string]chan map[string]interface{})}
+}
+
+// MemberChecker 供 processEvent 在核销验证码前反查“该 QQ 是否真在群里”，
+// 不再单方面信任入站事件里的 user_id / group_id 字段。
+type MemberChecker interface {
+	CheckGroupMember(groupID, userID string) (bool, error)
+}
+
+var _ MemberChecker = (*wsClient)(nil)
+
+// CheckGroupMember 向机器人发起 get_group_member_info 并等待回包（3s 超时）。
+func (c *wsClient) CheckGroupMember(groupID, userID string) (bool, error) {
+	gid, err := strconv.ParseInt(groupID, 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("非法 group_id: %q", groupID)
+	}
+	uid, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("非法 user_id: %q", userID)
+	}
+
+	echo := strconv.FormatUint(c.echoSeq.Add(1), 10)
+	ch := make(chan map[string]interface{}, 1)
+	c.pendingMu.Lock()
+	c.pending[echo] = ch
+	c.pendingMu.Unlock()
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, echo)
+		c.pendingMu.Unlock()
+	}()
+
+	payload := map[string]interface{}{
+		"action": "get_group_member_info",
+		"params": map[string]interface{}{"group_id": gid, "user_id": uid, "no_cache": true},
+		"echo":   echo,
+	}
+	c.writeMu.Lock()
+	werr := c.conn.WriteJSON(payload)
+	c.writeMu.Unlock()
+	if werr != nil {
+		return false, werr
+	}
+
+	select {
+	case resp := <-ch:
+		return memberInfoConfirms(resp), nil
+	case <-time.After(3 * time.Second):
+		return false, fmt.Errorf("get_group_member_info 超时")
+	}
+}
+
+// memberInfoConfirms 解析 OneBot v11/v12 动作回包：只有明确成功且携带
+// 成员数据时才视为“在群内”，任何错误/超时语义都按不确认处理。
+func memberInfoConfirms(resp map[string]interface{}) bool {
+	if status, ok := resp["status"].(string); ok && status != "ok" {
+		return false
+	}
+	if rc, ok := resp["retcode"].(float64); ok && rc != 0 {
+		return false
+	}
+	if ok, exists := resp["ok"].(bool); exists && !ok {
+		return false
+	}
+	data, hasData := resp["data"]
+	if !hasData || data == nil {
+		return false
+	}
+	if m, isMap := data.(map[string]interface{}); isMap {
+		if e, hasErr := m["error"]; hasErr && e != nil {
+			if em, ok := e.(map[string]interface{}); ok && len(em) > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// deliverPending 把带 echo 的动作回包分发给等待中的调用方；返回 true 表示
+// 该报文是回包（不再当事件处理）。
+func deliverPending(c *wsClient, raw []byte) bool {
+	if !bytes.Contains(raw, []byte(`"echo"`)) {
+		return false
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	echo, ok := resp["echo"].(string)
+	if !ok || echo == "" {
+		return false
+	}
+	c.pendingMu.Lock()
+	ch, waiting := c.pending[echo]
+	c.pendingMu.Unlock()
+	if !waiting {
+		return false
+	}
+	select {
+	case ch <- resp:
+	default:
+	}
+	return true
 }
 
 func (c *wsClient) SendGroupMsg(groupID, text string) error {
@@ -251,19 +376,67 @@ func unixRFC3339(sec int64) string {
 	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
-func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	token := database.GetSetting("onebot_token", "")
-	if token != "" {
-		auth := r.Header.Get("Authorization")
-		queryToken := r.URL.Query().Get("access_token")
-		expectedAuth := "Bearer " + token
-		validAuth := subtle.ConstantTimeCompare([]byte(auth), []byte(expectedAuth)) == 1
-		validQuery := subtle.ConstantTimeCompare([]byte(queryToken), []byte(token)) == 1
-		if !validAuth && !validQuery {
-			log.Printf("[OneBot] 401 Unauthorized WS attempt from %s", r.RemoteAddr)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+// wsToken 解析并强制 OneBot 反向 WS 口令：token 为空一律 503（fail-closed）。
+// 历史上 `if token != ""` 意味着“没配口令 = 谁都能连”，配合随源码公开的
+// 默认值等于认证形同虚设。
+func wsToken() string {
+	return strings.TrimSpace(database.GetSetting("onebot_token", ""))
+}
+
+// wsIPAllowed 应用 onebot_ws_ip_allowlist（逗号分隔 IP / CIDR）。未配置时
+// 放行全部来源：网络层隔离交给部署方，配置后即在应用层二次收口。
+func wsIPAllowed(r *http.Request) bool {
+	raw := strings.TrimSpace(database.GetSetting("onebot_ws_ip_allowlist", ""))
+	if raw == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
 		}
+		if strings.Contains(item, "/") {
+			if _, cidr, err := net.ParseCIDR(item); err == nil && cidr.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if allowed := net.ParseIP(item); allowed != nil && allowed.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	token := wsToken()
+	if token == "" {
+		log.Printf("[OneBot] 503 拒绝 WS 连接 %s：onebot_token 未配置", r.RemoteAddr)
+		http.Error(w, "OneBot WS disabled (token not configured)", http.StatusServiceUnavailable)
+		return
+	}
+	auth := r.Header.Get("Authorization")
+	queryToken := r.URL.Query().Get("access_token")
+	expectedAuth := "Bearer " + token
+	validAuth := subtle.ConstantTimeCompare([]byte(auth), []byte(expectedAuth)) == 1
+	validQuery := subtle.ConstantTimeCompare([]byte(queryToken), []byte(token)) == 1
+	if !validAuth && !validQuery {
+		log.Printf("[OneBot] 401 Unauthorized WS attempt from %s", r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !wsIPAllowed(r) {
+		log.Printf("[OneBot] 403 来源 IP 不在 onebot_ws_ip_allowlist 白名单内: %s", r.RemoteAddr)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -306,12 +479,120 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			<-workerDone
 			return
 		}
+		if deliverPending(client, message) {
+			continue
+		}
 		select {
 		case events <- message:
 		default:
 			log.Println("[OneBot] 事件队列已满，丢弃本条事件（等待机器人侧重发）")
 		}
 	}
+}
+
+// numericID 把事件里的 QQ 号 / 群号收敛成纯数字字符串。v12 上游给的是
+// 原始字符串，若原样透传，"<img src=x onerror=...>" 这类注入会一路流进
+// 会话身份、审计日志与后台 DOM（存储型 XSS），这里统一拒收非数字。
+func numericID(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) || t < 0 || t != math.Trunc(t) || t > math.MaxInt64 {
+			return "", false
+		}
+		return strconv.FormatInt(int64(t), 10), true
+	case int64:
+		if t < 0 {
+			return "", false
+		}
+		return strconv.FormatInt(t, 10), true
+	case int:
+		if t < 0 {
+			return "", false
+		}
+		return strconv.Itoa(t), true
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" || len(s) > 20 {
+			return "", false
+		}
+		if _, err := strconv.ParseUint(s, 10, 64); err != nil {
+			return "", false
+		}
+		return s, true
+	}
+	return "", false
+}
+
+// 验证码尝试限流：同一群 60 次/分钟、同一 QQ 30 次/分钟，防脚本爆破
+// 六位验证码与刷核销接口。
+const (
+	verifyWindow    = time.Minute
+	verifyMaxGroup  = 60
+	verifyMaxUser   = 30
+	verifyLimitKeys = 8192
+)
+
+var (
+	verifyLimitMu  sync.Mutex
+	verifyAttempts = make(map[string][]time.Time)
+)
+
+func attemptAllowed(key string, max int, now time.Time) bool {
+	stamps := verifyAttempts[key]
+	fresh := stamps[:0]
+	for _, t := range stamps {
+		if now.Sub(t) < verifyWindow {
+			fresh = append(fresh, t)
+		}
+	}
+	if len(fresh) >= max {
+		verifyAttempts[key] = fresh
+		return false
+	}
+	verifyAttempts[key] = append(fresh, now)
+	return true
+}
+
+func allowVerifyAttempt(groupID, userID string) bool {
+	now := time.Now()
+	verifyLimitMu.Lock()
+	defer verifyLimitMu.Unlock()
+	if len(verifyAttempts) > verifyLimitKeys {
+		for k, stamps := range verifyAttempts {
+			if len(stamps) == 0 || now.Sub(stamps[len(stamps)-1]) >= verifyWindow {
+				delete(verifyAttempts, k)
+			}
+		}
+	}
+	return attemptAllowed("g:"+groupID, verifyMaxGroup, now) &&
+		attemptAllowed("u:"+userID, verifyMaxUser, now)
+}
+
+// admissionCheck 是核销前的统一闸门：先过尝试限流，再按配置做群成员身份
+// 二次核验（拿事件里的 group_id/user_id 反查机器人，不信任入站字段）。
+func admissionCheck(sender Sender, groupID, userID, code string) bool {
+	if !allowVerifyAttempt(groupID, userID) {
+		log.Printf("[OneBot] ⚠ 群 %s / QQ %s 验证码尝试超频，已拒绝 (code=%s)", groupID, userID, code)
+		return false
+	}
+	if database.GetSetting("onebot_verify_member", "false") != "true" {
+		return true
+	}
+	mc, ok := sender.(MemberChecker)
+	if !ok {
+		log.Printf("[OneBot] ⚠ 已开启群成员二次核验，但当前连接不支持成员查询，拒绝核销 (group=%s user=%s)", groupID, userID)
+		return false
+	}
+	inGroup, err := mc.CheckGroupMember(groupID, userID)
+	if err != nil {
+		log.Printf("[OneBot] ⚠ 群成员二次核验失败，拒绝核销 (group=%s user=%s): %v", groupID, userID, err)
+		return false
+	}
+	if !inGroup {
+		log.Printf("[OneBot] ⚠ 事件声称的 QQ %s 经反查不在群 %s 内，拒绝核销", userID, groupID)
+		return false
+	}
+	return true
 }
 
 func processEvent(raw []byte, optionalSender ...Sender) {
@@ -356,12 +637,8 @@ func processEvent(raw []byte, optionalSender ...Sender) {
 	// Detect v11
 	if postType, ok := event["post_type"].(string); ok && postType == "message" {
 		if msgType, ok := event["message_type"].(string); ok && msgType == "group" {
-			if gID, ok := event["group_id"].(float64); ok {
-				groupID = strconv.FormatInt(int64(gID), 10)
-			}
-			if uID, ok := event["user_id"].(float64); ok {
-				userID = strconv.FormatInt(int64(uID), 10)
-			}
+			groupID, _ = numericID(event["group_id"])
+			userID, _ = numericID(event["user_id"])
 			text = extractTextV11(event)
 		}
 	}
@@ -372,12 +649,8 @@ func processEvent(raw []byte, optionalSender ...Sender) {
 			if c, ok := sender.(*wsClient); ok {
 				c.isV12.Store(true)
 			}
-			if gID, ok := event["group_id"].(string); ok {
-				groupID = gID
-			}
-			if uID, ok := event["user_id"].(string); ok {
-				userID = uID
-			}
+			groupID, _ = numericID(event["group_id"])
+			userID, _ = numericID(event["user_id"])
 			text = extractTextV12(event)
 		}
 	}
@@ -415,6 +688,9 @@ func processEvent(raw []byte, optionalSender ...Sender) {
 	}
 
 	if codeRegex.MatchString(text) {
+		if !admissionCheck(sender, groupID, userID, text) {
+			return
+		}
 		sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, text, userID, groupID)
 		if ok {
 			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", text, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
@@ -428,6 +704,9 @@ func processEvent(raw []byte, optionalSender ...Sender) {
 	// so a message that quotes two codes consumes the last one actually sent.
 	if match := codeSearchRegex.FindAllString(text, -1); len(match) > 0 {
 		candidate := match[len(match)-1]
+		if !admissionCheck(sender, groupID, userID, candidate) {
+			return
+		}
 		if sess, ok := session.DefaultManager.VerifyCode(identity.ProviderQQ, candidate, userID, groupID); ok {
 			log.Printf("[OneBot] ✓ 验证码 %s 已核销 → %s: %s | Session: %s\n", candidate, identity.Label(identity.ProviderQQ), userID, sess.SessionID)
 			return

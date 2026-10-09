@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"oneauth/internal/admin"
+	"oneauth/internal/csp"
 	"oneauth/internal/database"
 	"oneauth/internal/identity"
 	"oneauth/internal/oidc"
@@ -78,6 +81,10 @@ func main() {
 	loginTmpl := template.Must(template.ParseFS(tmplFS, "login.html"))
 	adminTmpl := template.Must(template.ParseFS(tmplFS, "admin.html"))
 
+	// 管理台页面无模板变量，直接按模板原文算 CSP 哈希（内联脚本与事件
+	// 处理器逐条入哈希，注入的新标记拿不到哈希即被拒执行）。
+	adminCSP := csp.Policy(mustReadTemplate("admin.html"))
+
 	// 静态资源服务
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
@@ -127,13 +134,21 @@ func main() {
 			// 通道动态展示各平台说明。
 			"PlatformLabel": identity.Label(identity.ProviderQQ),
 		}
-		if err := loginTmpl.Execute(w, data); err != nil {
+		var buf bytes.Buffer
+		if err := loginTmpl.Execute(&buf, data); err != nil {
 			log.Printf("[模板渲染] 登录页渲染失败: %v\n", err)
+			http.Error(w, "页面渲染失败", http.StatusInternalServerError)
+			return
 		}
+		// 登录页脚本里插有 session_id / 验证码等动态值，CSP 哈希必须按渲染
+		// 后的最终 HTML 计算，静态预计算会和实际输出对不上。
+		csp.SetHeader(w, csp.Policy(buf.String()))
+		_, _ = w.Write(buf.Bytes())
 	})
 
 	// 管理后台页面
 	mux.HandleFunc("GET /admin", admin.SecureHeaders(func(w http.ResponseWriter, r *http.Request) {
+		csp.SetHeader(w, adminCSP)
 		if err := adminTmpl.Execute(w, nil); err != nil {
 			log.Printf("[模板渲染] 管理后台渲染失败: %v\n", err)
 		}
@@ -213,12 +228,37 @@ func getEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
+// mustReadTemplate 读取嵌入模板原文，用于按静态 HTML 预计算 CSP。
+func mustReadTemplate(name string) string {
+	b, err := fs.ReadFile(web.EmbeddedFS, "templates/"+name)
+	if err != nil {
+		log.Fatalf("[启动失败] 读取模板 %s 失败: %v", name, err)
+	}
+	return string(b)
+}
+
 const (
-	demoClientID   = "oneauth_demo_app"
+	demoClientID   = oidc.DemoClientID
 	demoIssuerSlug = "demo-app"
 )
 
-var demoClientSecret = getEnv("DEMO_CLIENT_SECRET", "demo_secret_888888")
+// demoClientSecret 未配置 DEMO_CLIENT_SECRET 时自动生成一次性随机密钥并
+// 打印到启动日志，绝不回退到源码里的默认值 —— 源码公开等于口令公开，任何
+// 人都能拿默认密钥冒充 Demo 客户端走 /token。
+var demoClientSecret = resolveDemoClientSecret()
+
+func resolveDemoClientSecret() string {
+	if v := strings.TrimSpace(os.Getenv("DEMO_CLIENT_SECRET")); v != "" {
+		return v
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("[demo] 生成随机 DEMO_CLIENT_SECRET 失败: %v", err)
+	}
+	s := base64.RawURLEncoding.EncodeToString(b)
+	log.Printf("[demo] 未设置 DEMO_CLIENT_SECRET，已生成临时随机密钥: %s（请用环境变量固定，重启后会更换）", s)
+	return s
+}
 
 // demoGuard 用 demo_enabled 系统设置包裹 demo 相关 handler：关闭时统一
 // 返回 404，不泄露 demo 路由是否存在，也不影响其余路由的正常访问。

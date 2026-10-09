@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"oneauth/internal/audit"
 	"oneauth/internal/database"
 	"oneauth/internal/oidc"
 	"oneauth/internal/onebot"
@@ -218,7 +219,6 @@ func RestoreAdminSessions() (int, error) {
 	return adminStore.restoreFromDB()
 }
 
-
 // bcrypt 是 CPU 密集操作（DefaultCost 约 50~100ms），无限制地并发执行会被
 // 登录接口打满 CPU。信号量把同时进行的哈希/比对限制在核数以内。
 var bcryptSlots = make(chan struct{}, max(2, runtime.NumCPU()))
@@ -253,12 +253,14 @@ type loginFails struct {
 	until  time.Time // 锁定截止时间，零值表示未锁定
 }
 
-// loginLimiter 按来源 IP 记录登录失败：window 内失败达 max 次
-// 即锁定 lock 时长，成功登录立即清零。bcrypt 信号量保护 CPU，限速器
+// loginLimiter 按来源 IP 与账号两个维度记录登录失败：window 内失败达
+// max 次即锁定 lock 时长，成功登录立即清零。bcrypt 信号量保护 CPU，限速器
 // 再挡住在线爆破本身。
 //
-// 只按 RemoteAddr 取 IP，不信任 X-Forwarded-For：否则直连部署时可被伪造头
-// 完全绕过。反代部署下同源 IP 共享一个桶，属于可接受的保守取舍。
+// IP 维度：反代/CF 后面拿真实客户端 IP（仅当直连方是可信反代才采信
+// 转发头，否则头可伪造），避免全站访客挤进同一个桶。
+// 账号维度：锁账号本身，换 IP 爆破同一账号同样会被挡，同时不会因为
+// 同出口 NAT 的其他访客失败而误伤自己。
 type loginLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*loginFails
@@ -266,6 +268,9 @@ type loginLimiter struct {
 	max     int
 	lock    time.Duration
 }
+
+func ipKey(ip string) string        { return "ip:" + ip }
+func accountKey(user string) string { return "acct:" + strings.ToLower(strings.TrimSpace(user)) }
 
 var limiter = newLoginLimiter()
 
@@ -417,9 +422,23 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	host = strings.TrimSpace(host)
+	// 只有直连方是可信反代（回环/内网/链路本地）时才采信转发头：直连暴露
+	// 在公网时 CF-Connecting-IP / X-Forwarded-For 可任意伪造，会把限流桶
+	// 挪到攻击者指定的键上。可信反代后面的 Cloudflare 场景则取真实客户端
+	// IP，避免所有人共享 RemoteAddr 这一个桶。
+	if ip := net.ParseIP(host); ip != nil && isTrustedProxyAddr(ip) {
+		if real := strings.TrimSpace(audit.ExtractClientIP(r)); real != "" && net.ParseIP(real) != nil {
+			return real
+		}
 	}
 	return host
+}
+
+func isTrustedProxyAddr(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // processStart 供 /api/admin/stats 计算真实服务运行时间。
@@ -454,7 +473,7 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if wait := limiter.blocked(ip); wait > 0 {
+	if wait := limiter.blocked(ipKey(ip)); wait > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(wait))
 		writeError(w, http.StatusTooManyRequests,
 			fmt.Sprintf("登录失败次数过多，已临时锁定，请 %d 秒后重试", wait))
@@ -471,24 +490,35 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Username = strings.TrimSpace(req.Username)
 
+	acct := accountKey(req.Username)
+	if wait := limiter.blocked(acct); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(wait))
+		writeError(w, http.StatusTooManyRequests,
+			fmt.Sprintf("该账号登录失败次数过多，已临时锁定，请 %d 秒后重试", wait))
+		return
+	}
+
 	var hash string
 	err := database.DB.QueryRow("SELECT password_hash FROM admin_users WHERE username = ?", req.Username).Scan(&hash)
 	if err != nil {
 		_ = bcryptCompare(dummyHash, []byte(req.Password))
-		limiter.recordFailure(ip)
+		limiter.recordFailure(ipKey(ip))
+		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 登录失败（用户不存在）user=%q ip=%s", req.Username, ip)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
 	if err := bcryptCompare([]byte(hash), []byte(req.Password)); err != nil {
-		limiter.recordFailure(ip)
+		limiter.recordFailure(ipKey(ip))
+		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 登录失败（密码错误）user=%q ip=%s", req.Username, ip)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
-	limiter.clear(ip)
+	limiter.clear(ipKey(ip))
+	limiter.clear(acct)
 	token := generateToken()
 	if token == "" {
 		writeError(w, http.StatusInternalServerError, "Internal error")
@@ -563,7 +593,7 @@ func handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if wait := limiter.blocked(ip); wait > 0 {
+	if wait := limiter.blocked(ipKey(ip)); wait > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(wait))
 		writeError(w, http.StatusTooManyRequests,
 			fmt.Sprintf("尝试次数过多，已临时锁定，请 %d 秒后重试", wait))
@@ -579,6 +609,13 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
+	acct := accountKey(req.Username)
+	if wait := limiter.blocked(acct); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(wait))
+		writeError(w, http.StatusTooManyRequests,
+			fmt.Sprintf("尝试次数过多，已临时锁定，请 %d 秒后重试", wait))
+		return
+	}
 
 	if req.Username == "" || strings.ContainsAny(req.Username, " \t\r\n") || len(req.Username) > 64 {
 		writeError(w, http.StatusBadRequest, "用户名不能为空且长度不超过 64 个字符")
@@ -606,7 +643,8 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		limiter.recordFailure(ip)
+		limiter.recordFailure(ipKey(ip))
+		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 初始化被拒绝（管理员已存在）ip=%s", ip)
 		writeError(w, http.StatusForbidden, "管理员已存在，禁止重复初始化")
 		return
@@ -704,6 +742,36 @@ var systemSettingsSpecs = map[string]settingSpec{
 			return checkLength(label, val, 128)
 		},
 	},
+	// 反向 WS 的两道应用层收口：来源白名单 + 群成员身份二次核验。
+	"onebot_ws_ip_allowlist": {
+		Label: "WS 来源 IP 白名单",
+		Validate: func(label, val string) error {
+			if err := checkLength(label, val, 512); err != nil {
+				return err
+			}
+			for _, item := range database.SplitURIList(val) {
+				if strings.Contains(item, "/") {
+					if _, _, err := net.ParseCIDR(item); err != nil {
+						return fmt.Errorf("%s 含非法网段: %s", label, item)
+					}
+					continue
+				}
+				if net.ParseIP(item) == nil {
+					return fmt.Errorf("%s 含非法 IP: %s", label, item)
+				}
+			}
+			return nil
+		},
+	},
+	"onebot_verify_member": {
+		Label: "群成员二次核验",
+		Validate: func(label, val string) error {
+			if val != "true" && val != "false" {
+				return errors.New(label + " 只能为 true 或 false")
+			}
+			return nil
+		},
+	},
 	"code_ttl": {
 		Label: "验证码有效期",
 		Validate: func(label, val string) error {
@@ -777,17 +845,19 @@ func validateSetting(key, val string) error {
 
 func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := map[string]string{
-		"site_name":        database.GetSetting("site_name", ""),
-		"prompt_text":      database.GetSetting("prompt_text", "请发送验证码至群"),
-		"background_url":   database.GetSetting("background_url", ""),
-		"custom_css":       database.GetSetting("custom_css", ""),
-		"target_group_id":  database.GetSetting("target_group_id", ""),
-		"onebot_token":     database.GetSetting("onebot_token", ""),
-		"code_ttl":         database.GetSetting("code_ttl", ""),
-		"site_logo":        database.GetSetting("site_logo", ""),
-		"demo_enabled":     database.GetSetting("demo_enabled", "true"),
-		"update_check_url": database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"),
-		"update_proxy":     database.GetSetting("update_proxy", ""),
+		"site_name":              database.GetSetting("site_name", ""),
+		"prompt_text":            database.GetSetting("prompt_text", "请发送验证码至群"),
+		"background_url":         database.GetSetting("background_url", ""),
+		"custom_css":             database.GetSetting("custom_css", ""),
+		"target_group_id":        database.GetSetting("target_group_id", ""),
+		"onebot_token":           database.GetSetting("onebot_token", ""),
+		"onebot_ws_ip_allowlist": database.GetSetting("onebot_ws_ip_allowlist", ""),
+		"onebot_verify_member":   database.GetSetting("onebot_verify_member", "false"),
+		"code_ttl":               database.GetSetting("code_ttl", ""),
+		"site_logo":              database.GetSetting("site_logo", ""),
+		"demo_enabled":           database.GetSetting("demo_enabled", "true"),
+		"update_check_url":       database.GetSetting("update_check_url", "https://api.github.com/repos/amnssb/OneAuth/releases/latest"),
+		"update_proxy":           database.GetSetting("update_proxy", ""),
 	}
 	writeJSON(w, http.StatusOK, settings)
 }
@@ -882,27 +952,29 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 // 项目自动呈现各自外观。IssuerSlug 是该应用独立 Issuer 的路径标识，
 // Kid 是其当前在用签名密钥的 kid（供后台展示与轮换）。
 type ClientInfo struct {
-	ClientID      string `json:"client_id"`
-	ClientName    string `json:"client_name"`
-	RedirectURIs  string `json:"redirect_uris"`
-	CreatedAt     string `json:"created_at"`
-	DisplayName   string `json:"display_name"`
-	BackgroundURL string `json:"background_url"`
-	PromptText    string `json:"prompt_text"`
-	CustomCSS     string `json:"custom_css"`
-	TargetGroupID string `json:"target_group_id"`
-	IssuerSlug    string `json:"issuer_slug"`
-	Kid           string `json:"kid"`
+	ClientID       string `json:"client_id"`
+	ClientName     string `json:"client_name"`
+	RedirectURIs   string `json:"redirect_uris"`
+	PostLogoutURIs string `json:"post_logout_redirect_uris"`
+	CreatedAt      string `json:"created_at"`
+	DisplayName    string `json:"display_name"`
+	BackgroundURL  string `json:"background_url"`
+	PromptText     string `json:"prompt_text"`
+	CustomCSS      string `json:"custom_css"`
+	TargetGroupID  string `json:"target_group_id"`
+	IssuerSlug     string `json:"issuer_slug"`
+	Kid            string `json:"kid"`
 }
 
 type clientRequest struct {
-	ClientName    string `json:"client_name"`
-	RedirectURIs  string `json:"redirect_uris"`
-	DisplayName   string `json:"display_name"`
-	BackgroundURL string `json:"background_url"`
-	PromptText    string `json:"prompt_text"`
-	CustomCSS     string `json:"custom_css"`
-	TargetGroupID string `json:"target_group_id"`
+	ClientName     string `json:"client_name"`
+	RedirectURIs   string `json:"redirect_uris"`
+	PostLogoutURIs string `json:"post_logout_redirect_uris"`
+	DisplayName    string `json:"display_name"`
+	BackgroundURL  string `json:"background_url"`
+	PromptText     string `json:"prompt_text"`
+	CustomCSS      string `json:"custom_css"`
+	TargetGroupID  string `json:"target_group_id"`
 	// IssuerSlug 仅在创建时使用（创建后不可变），编辑请求会忽略此字段。
 	IssuerSlug string `json:"issuer_slug"`
 }
@@ -922,6 +994,17 @@ func validateClientRequest(req *clientRequest) error {
 		return err
 	}
 	req.RedirectURIs = strings.Join(uris, ",")
+
+	// 登出跳转白名单（RP-Initiated Logout）：留空 = 只允许同源/相对路径；
+	// 填了就必须是完整 http(s) 地址，否则登出时会被白名单校验拒掉。
+	req.PostLogoutURIs = strings.TrimSpace(req.PostLogoutURIs)
+	if req.PostLogoutURIs != "" {
+		plist, err := validateRedirectURIs(req.PostLogoutURIs)
+		if err != nil {
+			return errors.New("登出跳转白名单非法: " + err.Error())
+		}
+		req.PostLogoutURIs = strings.Join(plist, ",")
+	}
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	if len([]rune(req.DisplayName)) > 100 {
 		return errors.New("登录页显示名不能超过 100 个字符")
@@ -947,7 +1030,8 @@ func validateClientRequest(req *clientRequest) error {
 	return nil
 }
 
-const clientColumns = `c.client_id, c.client_name, c.redirect_uris, c.created_at,
+const clientColumns = `c.client_id, c.client_name, c.redirect_uris,
+	COALESCE(c.post_logout_redirect_uris, ''), c.created_at,
 	COALESCE(c.display_name, ''), COALESCE(c.background_url, ''),
 	COALESCE(c.prompt_text, ''), COALESCE(c.custom_css, ''),
 	COALESCE(c.target_group_id, ''), COALESCE(c.issuer_slug, ''),
@@ -964,7 +1048,7 @@ func handleListClients(w http.ResponseWriter, r *http.Request) {
 	clients := []ClientInfo{}
 	for rows.Next() {
 		var c ClientInfo
-		if err := rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.CreatedAt,
+		if err := rows.Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &c.PostLogoutURIs, &c.CreatedAt,
 			&c.DisplayName, &c.BackgroundURL, &c.PromptText, &c.CustomCSS,
 			&c.TargetGroupID, &c.IssuerSlug, &c.Kid); err != nil {
 			continue
@@ -1059,9 +1143,10 @@ func handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 	_, err = database.WriteDB.Exec(`
 		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris,
-			display_name, background_url, prompt_text, custom_css, target_group_id, issuer_slug)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		clientID, secretHash, req.ClientName, req.RedirectURIs,
+			post_logout_redirect_uris, display_name, background_url, prompt_text, custom_css,
+			target_group_id, issuer_slug)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		clientID, secretHash, req.ClientName, req.RedirectURIs, req.PostLogoutURIs,
 		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, req.TargetGroupID, slug)
 	if err != nil {
 		log.Printf("[管理后台] 创建客户端失败: %v", err)
@@ -1099,10 +1184,11 @@ func handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 
 	res, err := database.WriteDB.Exec(`
 		UPDATE oidc_clients SET client_name = ?, redirect_uris = ?,
+			post_logout_redirect_uris = ?,
 			display_name = ?, background_url = ?, prompt_text = ?, custom_css = ?,
 			target_group_id = ?
 		WHERE client_id = ?`,
-		req.ClientName, req.RedirectURIs,
+		req.ClientName, req.RedirectURIs, req.PostLogoutURIs,
 		req.DisplayName, req.BackgroundURL, req.PromptText, req.CustomCSS, req.TargetGroupID, id)
 	if err != nil {
 		log.Printf("[管理后台] 更新客户端 %s 失败: %v", id, err)
@@ -1233,4 +1319,3 @@ func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 		"offset": offset,
 	})
 }
-
