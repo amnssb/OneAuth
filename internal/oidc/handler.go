@@ -1014,13 +1014,19 @@ func audToString(v interface{}) string {
 // 只校验 scheme 为 http/https 是不够的 —— 那等于把任何外部站点变成
 // 可被本服务 302 的开放跳转板（钓鱼 / OAuth token 中转）。
 func isAllowedPostLogoutRedirect(r *http.Request, slug, hintClientID, uri string) bool {
-	u, err := url.Parse(strings.TrimSpace(uri))
+	clean := strings.TrimSpace(uri)
+	// 任何反斜杠（\）、URL 二次编码的反斜杠（%5c）或空白/换行均直接拒绝，
+	// 防止 WHATWG URL 规范中把 "/\evil.com" 规整为 "//evil.com" 形成开放重定向。
+	if strings.ContainsAny(clean, "\\\r\n\t") || strings.Contains(strings.ToLower(clean), "%5c") {
+		return false
+	}
+	u, err := url.Parse(clean)
 	if err != nil || u.Opaque != "" || u.User != nil || u.Fragment != "" {
 		return false
 	}
 
 	if u.Scheme == "" && u.Host == "" {
-		// "/path" 放行；"//host/path"（协议相对）与 "javascript:" 已在上面排除
+		// "/path" 放行；"//host/path"（协议相对）与 "/\" 已在上方排除
 		return strings.HasPrefix(u.Path, "/") && !strings.HasPrefix(u.Path, "//")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
@@ -1032,14 +1038,14 @@ func isAllowedPostLogoutRedirect(r *http.Request, slug, hintClientID, uri string
 		clientID, _ = database.ClientIDForSlug(slug)
 	}
 	for _, allowed := range database.ClientPostLogoutURIs(clientID) {
-		if allowed == uri {
+		if allowed == clean {
 			return true
 		}
 		if au, err := url.Parse(allowed); err == nil && au.String() == u.String() {
 			return true
 		}
 	}
-	return u.Host == r.Host
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // handleLogoutCore 实现 OIDC RP-Initiated Logout 1.0 登出端点

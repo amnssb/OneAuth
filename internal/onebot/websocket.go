@@ -98,7 +98,7 @@ func (c *wsClient) CheckGroupMember(groupID, userID string) (bool, error) {
 		return false, fmt.Errorf("非法 user_id: %q", userID)
 	}
 
-	echo := strconv.FormatUint(c.echoSeq.Add(1), 10)
+	echo := "chk_" + strconv.FormatUint(c.echoSeq.Add(1), 10)
 	ch := make(chan map[string]interface{}, 1)
 	c.pendingMu.Lock()
 	c.pending[echo] = ch
@@ -165,8 +165,14 @@ func deliverPending(c *wsClient, raw []byte) bool {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return false
 	}
-	echo, ok := resp["echo"].(string)
-	if !ok || echo == "" {
+	var echo string
+	switch v := resp["echo"].(type) {
+	case string:
+		echo = v
+	case float64:
+		echo = strconv.FormatInt(int64(v), 10)
+	}
+	if echo == "" {
 		return false
 	}
 	c.pendingMu.Lock()

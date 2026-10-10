@@ -1084,6 +1084,12 @@ func validateRedirectURIs(raw string) ([]string, error) {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return nil, fmt.Errorf("回调地址必须是完整的 http(s) URL: %s", uri)
 		}
+		if u.User != nil {
+			return nil, fmt.Errorf("回调地址不能包含账号信息 (userinfo): %s", uri)
+		}
+		if strings.Contains(uri, "\\") || strings.Contains(strings.ToLower(uri), "%5c") {
+			return nil, fmt.Errorf("回调地址不能包含反斜杠: %s", uri)
+		}
 		if u.Fragment != "" {
 			return nil, fmt.Errorf("回调地址不能包含 # 片段: %s", uri)
 		}

@@ -647,6 +647,10 @@ func TestRPInitiatedLogout(t *testing.T) {
 		"http://app.local/goodbye.evil.com",
 		"https://app.local@evil.com/",
 		"//evil.com/pwn",
+		"/\\evil.com/pwn",
+		"\\evil.com/pwn",
+		"//evil.com",
+		"/\\evil.com",
 	} {
 		rec := tenantLogout("/logout-tenant/logout?post_logout_redirect_uri=" + url.QueryEscape(evil))
 		if rec.Code == http.StatusFound {
