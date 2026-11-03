@@ -317,7 +317,7 @@ cd OneAuth && git pull && docker compose up -d --build
 1. 点击 **网络配置** → **添加反向 WebSocket**。
 2. 填入参数：
    - **连接地址 (URL)**：`ws://oneauth:9000/ws/onebot`（⚠️ 注意：容器间通信直接写容器名 `oneauth` 即可，**不要**写 `localhost`）
-   - **Access Token**：填写在 OneAuth 控制台中设置的 `onebot_token`（必填；未配置时启动会自动生成并打印到日志，空 Token 会被拒绝握手）
+   - **Access Token**：填写在 OneAuth 控制台中设置的 `onebot_token`（必填；未配置时启动会自动生成随机值并存入设置，Token 值不打印到日志，请在管理台查看，空 Token 会被拒绝握手）
    - **重连时间**：`3000` 毫秒
 3. 保存并启用配置。
 
@@ -493,8 +493,9 @@ auto_login = false
 5. **安全中心**: 修改管理员密码（成功后其它已登录会话全部吊销）；「退出登录」会在服务端立即吊销当前会话。
 
 ### 安全机制：
-- 登录接口按**来源 IP 与账号双维度**限速：5 分钟内失败 5 次即锁定 15 分钟（返回 429 与 Retry-After），拿不到可信反代头时只按来源 IP 限速，避免共享出口互相牵连。
-- 管理会话滑动续期（24 小时无操作才过期），全部管理 API 响应带 `no-store` 与 `X-Frame-Options: DENY` 等安全头，请求体上限 1 MiB。
+- 登录接口按**来源 IP 与账号双维度**限速：5 分钟内失败 5 次即锁定 15 分钟（返回 429 与 Retry-After）；名额在 bcrypt 之前原子预占，并发请求无法绕过。反代后面拿不到可区分的真实 IP 时跳过 IP 维度、只按账号限速，避免全体访客共享同一个限流桶被一起锁定。
+- 管理会话滑动续期（24 小时无操作才过期），浏览器管理台凭据改由 HttpOnly Cookie 承载（SameSite=Lax + Cookie 会话同源校验），不再存入 localStorage；全部管理 API 响应带 `no-store` 与 `X-Frame-Options: DENY` 等安全头，请求体上限 1 MiB。
+- Demo 回调页只接受纯数字 QQ 号并对输出转义，下发 `script-src 'none'` 的严格 CSP；Demo 换取 Token 固定走回环自调用，不信任请求 Host 头。`DEMO_CLIENT_SECRET` 为历史公开默认值或过短时会被忽略并改用随机密钥，密钥值不写入日志。
 - `/logout` 的 `post_logout_redirect_uri` 必须命中应用登记的白名单，未登记时仅放行同源绝对地址与相对路径，且 `id_token_hint` 必须验签通过才采信。
 - 管理台与登录页下发基于渲染结果哈希的严格 CSP（`script-src 'self' 'unsafe-hashes'`），不使用全站 `'unsafe-inline'`；审计日志等自定义渲染字段统一 HTML 转义。
 - 二进制无感更新强制校验 `checksum`（sha256），缺失或不匹配一律 400 并清理临时文件。
@@ -510,7 +511,7 @@ auto_login = false
 ### Q2: 群内发送验证码后，前端页面没有跳转？
 1. **检查群号**: 确认用户发送消息的 QQ 群号与管理后台设置的 `target_group_id` 完全一致。
 2. **检查 Bot 日志**: 确认 NapCat 反向 WebSocket 是否已成功连接到 `/ws/onebot`，并有消息上报日志。
-3. **检查 Token**: `onebot_token` 现在必填 —— 未配置或仍为历史公开默认值时服务启动会自动生成随机 Token 并写入日志，空 Token 直接拒绝握手（503）。让 NapCat 的 WS 握手 URL 或 Header 携带该 Token；若已配置 `onebot_ws_ip_allowlist`，确认来源 IP 落在白名单内。
+3. **检查 Token**: `onebot_token` 现在必填 —— 未配置或仍为历史公开默认值时服务启动会自动生成随机 Token（不写入日志，请在管理台查看），空 Token 或历史公开默认值直接拒绝握手（503）。让 NapCat 的 WS 握手 URL 或 Header 携带该 Token；若已配置 `onebot_ws_ip_allowlist`，确认来源 IP 落在白名单内。
 4. **检查反代缓冲**: Nginx 反代环境下必须确认 `proxy_buffering off;`，否则 SSE 推送事件会被 Nginx 缓存而无法即时到达前端。
 
 ### Q3: 业务系统报错“Token 校验失败”？

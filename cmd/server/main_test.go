@@ -29,6 +29,33 @@ func TestResolveDemoClientSecret(t *testing.T) {
 	}
 }
 
+// 环境变量里的历史公开默认值与过短口令不得被采信：视为未配置，
+// 生成随机密钥替代。
+func TestResolveDemoClientSecretRejectsWeakEnv(t *testing.T) {
+	t.Setenv("DEMO_CLIENT_SECRET", "demo_secret_888888")
+	if got := resolveDemoClientSecret(); got == "demo_secret_888888" || got == "" {
+		t.Fatalf("legacy env secret must never be used, got %q", got)
+	}
+	t.Setenv("DEMO_CLIENT_SECRET", "short")
+	if got := resolveDemoClientSecret(); got == "short" || got == "" {
+		t.Fatalf("short env secret must never be used, got %q", got)
+	}
+}
+
+// Demo 回调渲染的 QQ 号必须是纯数字，否则是反射型 XSS 的入口。
+func TestIsNumericQQ(t *testing.T) {
+	for _, ok := range []string{"10001", "1973901301", "12345678901234567890"} {
+		if !isNumericQQ(ok) {
+			t.Fatalf("%q must be a valid QQ number", ok)
+		}
+	}
+	for _, bad := range []string{"", "1234", "\"><img src=x onerror=alert(1)>", "10001<script>", "10001 ", "12.5", "-10001"} {
+		if isNumericQQ(bad) {
+			t.Fatalf("%q must not be a valid QQ number", bad)
+		}
+	}
+}
+
 // 管理台 CSP 必须覆盖页面自带的内联脚本与事件处理器（否则上线即白屏），
 // 同时注入的新脚本拿不到哈希。
 func TestAdminCSPCoversInlineScript(t *testing.T) {

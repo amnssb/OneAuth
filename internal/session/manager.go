@@ -224,6 +224,20 @@ func (m *Manager) CreateSession(clientID, redirectURI, state, challenge, groupID
 	})
 }
 
+// isNumericIdentity 判定身份标识是否为纯数字（QQ 号/群号）：
+// 仅含 0-9 且长度 1~20，拒绝空串、符号、前导空白与 HTML 注入载荷。
+func isNumericIdentity(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // VerifyCode 把验证码核销为平台身份并绑定到会话。provider 标识核销通道
 // 来源（当前仅 identity.ProviderQQ，新平台接入各自通道时传自己的标识）。
 // groupID 为消息来源群号，必须与会话绑定的 GroupID 一致才允许核销。
@@ -243,6 +257,13 @@ func (m *Manager) VerifyCode(provider, code, userID, groupID string) (*AuthSessi
 	// 群号必须与会话绑定的群一致：应用级群绑定后，不同应用的验证码
 	// 只能在各自绑定的群内核销，防止跨群冒用。
 	if session.GroupID == "" || groupID != session.GroupID {
+		return nil, false
+	}
+
+	// 身份是信任边界：userID 会原样成为 id_token 的 sub，绝不接受
+	// 非纯数字身份。OneBot 层已有 numericID 收敛，这里再挡一道，
+	// 防止其他调用方把注入载荷带进签发的身份断言。
+	if !isNumericIdentity(userID) || !isNumericIdentity(groupID) {
 		return nil, false
 	}
 
