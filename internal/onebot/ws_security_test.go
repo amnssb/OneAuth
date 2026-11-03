@@ -42,6 +42,18 @@ func TestWebSocketFailClosedWithoutToken(t *testing.T) {
 	}
 }
 
+// 历史公开默认值即使还存在数据库里也必须 503：启动轮换失败
+// 或从旧备份恢复时，公开口令不能成为建连凭证。
+func TestWebSocketRejectsLegacyToken(t *testing.T) {
+	initSecurityTestDB(t)
+	if err := database.SetSetting("onebot_token", "oneauth_secure_secret_token"); err != nil {
+		t.Fatalf("set legacy token: %v", err)
+	}
+	if rec := doWS("oneauth_secure_secret_token", "203.0.113.10:40000"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("legacy token must yield 503, got %d", rec.Code)
+	}
+}
+
 func TestWebSocketTokenEnforced(t *testing.T) {
 	initSecurityTestDB(t)
 	if err := database.SetSetting("onebot_token", "unit-test-secret"); err != nil {

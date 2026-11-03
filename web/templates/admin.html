@@ -1509,7 +1509,10 @@
     <div class="toast" id="toast"></div>
 
     <script>
-    let token = localStorage.getItem('admin_token');
+    // 管理会话凭据改由 HttpOnly Cookie 承载（登录时服务端 Set-Cookie），
+    // JS 不再持有 token：同源 XSS 无法从 localStorage 直接偷走会话。
+    // 旧版本可能已在 localStorage 留下 token，这里只删除、不读取。
+    localStorage.removeItem('admin_token');
     let statsTimer = null;
     let serverUptime = null;
     let lastSync = 0;
@@ -1521,10 +1524,15 @@
     // "创建管理员"分支，否则走日常登录 —— 修复此前"首次部署无 UI 入口创建
     // 管理员"的问题（只能绕过前端手工调用 /api/admin/setup）。
     async function initCheck() {
-        if (token) {
-            showApp();
-            return;
-        }
+        // Cookie 是否有效由服务端判定：探一次需鉴权的接口，200 即
+        // 已登录（Cookie 由浏览器自动携带），401 则走登录/初始化。
+        try {
+            const probe = await fetch('/api/admin/stats', { credentials: 'same-origin' });
+            if (probe.ok) {
+                showApp();
+                return;
+            }
+        } catch (e) { /* 探活失败则落到登录弹窗 */ }
         try {
             const res = await fetch('/api/admin/setup');
             const data = await res.json().catch(() => ({}));
@@ -1543,11 +1551,12 @@
         $('loginOverlay').classList.remove('hidden');
     }
 
-    // 统一请求封装：自动携带 token，集中处理网络错误、非 JSON 响应与 401，
+    // 统一请求封装：凭据由 HttpOnly Cookie 自动携带（same-origin），
+    // JS 不再拼 Authorization 头；集中处理网络错误、非 JSON 响应与 401，
     // 调用方只写成功路径，出错时抛出带可读信息的 Error。
     async function apiFetch(url, options = {}, { allow401 = false } = {}) {
-        const opts = Object.assign({}, options);
-        opts.headers = Object.assign({'Authorization': 'Bearer ' + token}, options.headers || {});
+        const opts = Object.assign({ credentials: 'same-origin' }, options);
+        opts.headers = Object.assign({}, options.headers || {});
         let res;
         try {
             res = await fetch(url, opts);
@@ -1610,13 +1619,13 @@
     }
 
     async function doLogin(user, pass) {
-        const data = await apiFetch('/api/admin/login', {
+        // 登录成功后服务端已通过 Set-Cookie 下发 HttpOnly 会话，
+        // 响应 JSON 里的 token 仅供非浏览器客户端，前端不保存它。
+        await apiFetch('/api/admin/login', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({username: user, password: pass})
         }, { allow401: true });
-        token = data.token;
-        localStorage.setItem('admin_token', token);
         $('displayUsername').innerText = user;
         $('loginPass').value = '';
         showApp();
@@ -1983,16 +1992,15 @@
         setTimeout(() => toast.classList.remove('show'), 3500);
     }
 
-    // 注销：先让服务端吊销会话（token 立即失效），再清理本地凭据。
+    // 注销：先让服务端吊销会话并清除 HttpOnly Cookie，再刷新页面。
     async function logout() {
         try {
-            await fetch('/api/admin/logout', { method: 'POST', headers: {'Authorization': 'Bearer ' + token} });
+            await fetch('/api/admin/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (e) { /* 网络失败也要完成本地登出 */ }
         forceLogout();
     }
 
     function forceLogout() {
-        localStorage.removeItem('admin_token');
         if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
         location.reload();
     }

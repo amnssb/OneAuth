@@ -382,11 +382,17 @@ func unixRFC3339(sec int64) string {
 	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
-// wsToken 解析并强制 OneBot 反向 WS 口令：token 为空一律 503（fail-closed）。
-// 历史上 `if token != ""` 意味着“没配口令 = 谁都能连”，配合随源码公开的
-// 默认值等于认证形同虚设。
+// wsToken 解析并强制 OneBot 反向 WS 口令：token 为空或为历史公开
+// 默认值一律返回 ""，由调用方 503（fail-closed）。历史上
+// `if token != ""` 意味着“没配口令 = 谁都能连”，配合随源码公开的
+// 默认值等于认证形同虚设；这里再挡一道，即使启动轮换失败或数据库
+// 从旧备份恢复，公开默认值也连不上。
 func wsToken() string {
-	return strings.TrimSpace(database.GetSetting("onebot_token", ""))
+	token := strings.TrimSpace(database.GetSetting("onebot_token", ""))
+	if token == "" || database.IsLegacyOnebotToken(token) {
+		return ""
+	}
+	return token
 }
 
 // wsIPAllowed 应用 onebot_ws_ip_allowlist（逗号分隔 IP / CIDR）。未配置时

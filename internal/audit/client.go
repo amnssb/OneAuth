@@ -18,8 +18,15 @@ type DeviceInfo struct {
 // 优先级:
 // 1. CF-Connecting-IP (Cloudflare 官方注入的标准客户端真实 IP)
 // 2. True-Client-IP (部分企业级 CDN / Akamai / CF Enterprise)
-// 3. X-Forwarded-For (逗号分隔取最左侧非私有或有效 IP)
+// 3. X-Forwarded-For（取最右侧有效 IP）
 // 4. RemoteAddr 回退
+//
+// X-Forwarded-For 必须取最右侧：链上每个反代都会把自己看到的对端 IP
+// 追加到末尾，最左侧是客户端最初发来的、完全可伪造的值。取首位等于
+// 让攻击者任意指定限流桶 / 审计 IP（把桶挪到受害者头上，或把自己
+// 的请求记到别人的 IP 名下）。单反代部署时最右侧即真实客户端 IP。
+// 本函数本身不做“直连方是否可信”的判断，调用方必须只在直连方是
+// 可信反代时才采信转发头（见 internal/admin.clientIP）。
 func ExtractClientIP(r *http.Request) string {
 	// 1. Cloudflare 专属 Header
 	if cfIP := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cfIP != "" {
@@ -35,11 +42,12 @@ func ExtractClientIP(r *http.Request) string {
 		}
 	}
 
-	// 3. X-Forwarded-For: client, proxy1, proxy2
+	// 3. X-Forwarded-For: client, proxy1, proxy2 —— 从右往左取
+	// 第一个有效 IP，即离本服务最近的可信反代看到的对端 IP。
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
-		for _, part := range parts {
-			ip := strings.TrimSpace(part)
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := strings.TrimSpace(parts[i])
 			if parsed := net.ParseIP(ip); parsed != nil {
 				return ip
 			}

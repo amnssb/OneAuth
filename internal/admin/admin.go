@@ -331,6 +331,43 @@ func (l *loginLimiter) recordFailure(key string) {
 	}
 }
 
+// tryReserve 在 bcrypt 之前原子地预占一次尝试名额：调用方先预占、
+// 再做慢速的 bcrypt 比对，失败不再补记。没有这一步，并发请求会
+// 在 blocked() 检查时全部看到“未锁定”，再排队做 bcrypt——256 条
+// 预连接 socket 能在同一个 5 次/窗口里拿到 256 次 401（TOCTOU，
+// 实测 ~51x）。预占后第 max 次尝试即触发锁定，第 max+1 次起
+// 直接 429，不再进入 bcrypt；在途尝试也被计入名额。
+// 返回 false 表示已锁定，调用方应直接 429 且不再做 bcrypt。
+func (l *loginLimiter) tryReserve(key string) bool {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.entries) >= maxBuckets {
+		l.pruneLocked(now)
+	}
+	e := l.entries[key]
+	if e == nil {
+		e = &loginFails{}
+		l.entries[key] = e
+	}
+	if now.Before(e.until) {
+		return false
+	}
+	fresh := e.stamps[:0]
+	for _, t := range e.stamps {
+		if now.Sub(t) < l.window {
+			fresh = append(fresh, t)
+		}
+	}
+	fresh = append(fresh, now)
+	e.stamps = fresh
+	if len(e.stamps) >= l.max {
+		e.until = now.Add(l.lock)
+		e.stamps = e.stamps[:0]
+	}
+	return true
+}
+
 func (l *loginLimiter) clear(key string) {
 	l.mu.Lock()
 	delete(l.entries, key)
@@ -420,6 +457,19 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func clientIP(r *http.Request) string {
+	ip, _ := clientIPInfo(r)
+	return ip
+}
+
+// clientIPInfo 返回限流/审计用的客户端 IP 与“该 IP 是否可区分”。
+// identifiable 为 false 的典型场景：服务跑在 Caddy 等反代后面，
+// 直连方是 127.0.0.1，但反代没有透传任何转发头——此时所有访客
+// 在本服务看来都是同一个 127.0.0.1。把这个共享地址当成限流桶，
+// 攻击者 5 次失败就能把全体管理员锁定 15 分钟（全局 DoS）；
+// 反过来，攻击者也能躲在这个桶后面让正常管理员替他分摊名额。
+// 不可区分时调用方应跳过 IP 维度限流，只用账号维度限流，并
+// 在日志里提示部署方检查反代透传配置。
+func clientIPInfo(r *http.Request) (ip string, identifiable bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -430,11 +480,25 @@ func clientIP(r *http.Request) string {
 	// 挪到攻击者指定的键上。可信反代后面的 Cloudflare 场景则取真实客户端
 	// IP，避免所有人共享 RemoteAddr 这一个桶。
 	if ip := net.ParseIP(host); ip != nil && isTrustedProxyAddr(ip) {
-		if real := strings.TrimSpace(audit.ExtractClientIP(r)); real != "" && net.ParseIP(real) != nil {
-			return real
+		if real := strings.TrimSpace(audit.ExtractClientIP(r)); real != "" && net.ParseIP(real) != nil && real != host {
+			return real, true
 		}
+		// 直连方是反代但拿不到转发头：RemoteAddr 只是反代地址，
+		// 不能代表任何一个真实访客。
+		return host, false
 	}
-	return host
+	return host, true
+}
+
+var sharedBucketWarned = struct {
+	sync.Once
+}{}
+
+// warnSharedBucket 只在进程内提示一次，避免登录失败日志被刷屏。
+func warnSharedBucket() {
+	sharedBucketWarned.Do(func() {
+		log.Printf("[管理后台] 警告：无法从反代透传头识别真实客户端 IP（直连方为回环/内网地址且无转发头），IP 维度限流已跳过、仅账号维度生效；请检查反代是否透传 X-Forwarded-For / CF-Connecting-IP，否则全体访客共享同一个限流桶")
+	})
 }
 
 func isTrustedProxyAddr(ip net.IP) bool {
@@ -472,12 +536,18 @@ func RegisterRoutes(mux *http.ServeMux) {
 }
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	if wait := limiter.blocked(ipKey(ip)); wait > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(wait))
-		writeError(w, http.StatusTooManyRequests,
-			fmt.Sprintf("登录失败次数过多，已临时锁定，请 %d 秒后重试", wait))
-		return
+	ip, ipIdentifiable := clientIPInfo(r)
+	if !ipIdentifiable {
+		warnSharedBucket()
+	}
+	ipK := ipKey(ip)
+	if ipIdentifiable {
+		if wait := limiter.blocked(ipK); wait > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(wait))
+			writeError(w, http.StatusTooManyRequests,
+				fmt.Sprintf("登录失败次数过多，已临时锁定，请 %d 秒后重试", wait))
+			return
+		}
 	}
 
 	var req struct {
@@ -498,26 +568,37 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 在 bcrypt 之前原子预占名额（见 tryReserve）：失败尝试在进入
+	// 慢速比对前就已计入，杜绝并发 TOCTOU 绕过；成功登录再清零。
+	if ipIdentifiable && !limiter.tryReserve(ipK) {
+		w.Header().Set("Retry-After", strconv.Itoa(limiter.blocked(ipK)))
+		writeError(w, http.StatusTooManyRequests, "登录失败次数过多，已临时锁定，请稍后重试")
+		return
+	}
+	if !limiter.tryReserve(acct) {
+		w.Header().Set("Retry-After", strconv.Itoa(limiter.blocked(acct)))
+		writeError(w, http.StatusTooManyRequests, "该账号登录失败次数过多，已临时锁定，请稍后重试")
+		return
+	}
+
 	var hash string
 	err := database.DB.QueryRow("SELECT password_hash FROM admin_users WHERE username = ?", req.Username).Scan(&hash)
 	if err != nil {
 		_ = bcryptCompare(dummyHash, []byte(req.Password))
-		limiter.recordFailure(ipKey(ip))
-		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 登录失败（用户不存在）user=%q ip=%s", req.Username, ip)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
 	if err := bcryptCompare([]byte(hash), []byte(req.Password)); err != nil {
-		limiter.recordFailure(ipKey(ip))
-		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 登录失败（密码错误）user=%q ip=%s", req.Username, ip)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
-	limiter.clear(ipKey(ip))
+	if ipIdentifiable {
+		limiter.clear(ipK)
+	}
 	limiter.clear(acct)
 	token := generateToken()
 	if token == "" {
@@ -530,7 +611,10 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		IssuedAt: now.Unix(),
 		Exp:      now.Add(adminSessionTTL).Unix(),
 	})
+	setAdminSessionCookie(w, r, token)
 	log.Printf("[管理后台] 管理员 %s 登录成功 ip=%s", req.Username, ip)
+	// token 仍在 JSON 里返回，供非浏览器 API 客户端使用；浏览器
+	// 管理台不再读取它，凭据改由 HttpOnly Cookie 承载（见 admin.html）。
 	writeJSON(w, http.StatusOK, map[string]string{"token": token, "username": req.Username})
 }
 
@@ -538,6 +622,7 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token, _ := r.Context().Value(ctxKeyToken).(string); token != "" {
 		adminStore.delete(token)
 	}
+	clearAdminSessionCookie(w, r)
 	if claim := claimFrom(r); claim != nil {
 		log.Printf("[管理后台] 管理员 %s 已退出登录 ip=%s", claim.Username, clientIP(r))
 	}
@@ -592,12 +677,18 @@ func handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	if wait := limiter.blocked(ipKey(ip)); wait > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(wait))
-		writeError(w, http.StatusTooManyRequests,
-			fmt.Sprintf("尝试次数过多，已临时锁定，请 %d 秒后重试", wait))
-		return
+	ip, ipIdentifiable := clientIPInfo(r)
+	if !ipIdentifiable {
+		warnSharedBucket()
+	}
+	ipK := ipKey(ip)
+	if ipIdentifiable {
+		if wait := limiter.blocked(ipK); wait > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(wait))
+			writeError(w, http.StatusTooManyRequests,
+				fmt.Sprintf("尝试次数过多，已临时锁定，请 %d 秒后重试", wait))
+			return
+		}
 	}
 
 	var req struct {
@@ -626,6 +717,16 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 与登录一样：bcrypt 之前先原子预占名额，杜绝并发绕过。
+	if ipIdentifiable && !limiter.tryReserve(ipK) {
+		writeError(w, http.StatusTooManyRequests, "尝试次数过多，已临时锁定，请稍后重试")
+		return
+	}
+	if !limiter.tryReserve(acct) {
+		writeError(w, http.StatusTooManyRequests, "尝试次数过多，已临时锁定，请稍后重试")
+		return
+	}
+
 	hash, err := bcryptHash([]byte(req.Password))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Internal error")
@@ -643,13 +744,15 @@ func handleInitialSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		limiter.recordFailure(ipKey(ip))
-		limiter.recordFailure(acct)
 		log.Printf("[管理后台] 初始化被拒绝（管理员已存在）ip=%s", ip)
 		writeError(w, http.StatusForbidden, "管理员已存在，禁止重复初始化")
 		return
 	}
 
+	if ipIdentifiable {
+		limiter.clear(ipK)
+	}
+	limiter.clear(acct)
 	log.Printf("[管理后台] 管理员 %s 初始化创建成功 ip=%s", req.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -739,6 +842,17 @@ var systemSettingsSpecs = map[string]settingSpec{
 	"onebot_token": {
 		Label: "OneBot Token",
 		Validate: func(label, val string) error {
+			// 空值会让 WS 停摆、公开默认值会让 WS 形同虚设：两者
+			// 都在入口拒绝，宁可管理员显式配一个强随机口令。
+			if strings.TrimSpace(val) == "" {
+				return errors.New(label + " 不能为空（清空将导致 OneBot WS 停用）")
+			}
+			if database.IsLegacyOnebotToken(val) {
+				return errors.New(label + " 不能使用历史公开默认值")
+			}
+			if len(strings.TrimSpace(val)) < 16 {
+				return errors.New(label + " 长度至少 16 个字符")
+			}
 			return checkLength(label, val, 128)
 		},
 	},
@@ -1258,14 +1372,96 @@ func handleRotateClientKey(w http.ResponseWriter, r *http.Request) {
 
 // ---- 鉴权与工具 ----
 
+const adminSessionCookie = "admin_token"
+
+// setAdminSessionCookie 把管理会话写进 HttpOnly Cookie：JS 读不到，
+// 同源 XSS 无法像读 localStorage 那样直接把会话偷走复用。Secure
+// 只在 HTTPS 时加（直连 http 部署下 Secure Cookie 根本不会被
+// 浏览器发回，管理台会登录不上）；SameSite=Lax 让跨站 POST/fetch
+// 默认不带 Cookie，再叠加 authMiddleware 的同源校验。
+func setAdminSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(adminSessionTTL / time.Second),
+		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearAdminSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// requestIsHTTPS 判定当前请求是否走 HTTPS：直连 TLS，或经可信反代
+// 透传 X-Forwarded-Proto: https。直连公网时该头可伪造，不采信。
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if r.Header.Get("X-Forwarded-Proto") != "https" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && isTrustedProxyAddr(ip)
+}
+
+// adminTokenFromRequest 优先读 Bearer（非浏览器 API 客户端与旧测试），
+// 其次读 HttpOnly Cookie（浏览器管理台）。Cookie 路径返回 fromCookie，
+// 供 authMiddleware 对 Cookie 会话做额外的同源校验。
+func adminTokenFromRequest(r *http.Request) (token string, fromCookie bool) {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if t := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")); t != "" {
+			return t, false
+		}
+	}
+	if c, err := r.Cookie(adminSessionCookie); err == nil && strings.TrimSpace(c.Value) != "" {
+		return c.Value, true
+	}
+	return "", false
+}
+
+// sameOriginRequest 校验 Origin/Referer 是否同源：Cookie 会话下，
+// 跨站请求即使带上 Cookie 也会被挡。两个头都不带时（同源 fetch
+// 默认可能不带 Origin）放行，SameSite=Lax 已挡住跨站写请求。
+func sameOriginRequest(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		u, err := url.Parse(origin)
+		return err == nil && strings.EqualFold(u.Host, r.Host)
+	}
+	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+		u, err := url.Parse(referer)
+		return err == nil && strings.EqualFold(u.Host, r.Host)
+	}
+	return true
+}
+
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
+		token, fromCookie := adminTokenFromRequest(r)
+		if token == "" {
 			writeError(w, http.StatusUnauthorized, "未登录或会话已过期")
 			return
 		}
-		token := strings.TrimPrefix(auth, "Bearer ")
+		if fromCookie && !sameOriginRequest(r) {
+			writeError(w, http.StatusUnauthorized, "未登录或会话已过期")
+			return
+		}
 
 		claim, ok := adminStore.get(token)
 		if !ok || claim.Username == "" {

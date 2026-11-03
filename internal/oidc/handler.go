@@ -426,7 +426,7 @@ func handleAuthorizeCore(w http.ResponseWriter, r *http.Request, slug, tenantCli
 
 	scopes := strings.Fields(scope)
 
-	clientIP := audit.ExtractClientIP(r)
+	clientIP := trustedClientIP(r)
 	devInfo := audit.ExtractDeviceInfo(r)
 
 	sess, err := session.DefaultManager.CreateSessionWithOptions(session.CreateSessionOptions{
@@ -1263,6 +1263,22 @@ func isTrustedProxy(remoteAddr string) bool {
 		return false
 	}
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// trustedClientIP 返回审计/会话记录用的客户端 IP：只在直连方是
+// 可信反代时才采信转发头，否则一律用 RemoteAddr。audit.ExtractClientIP
+// 本身不做可信判断，直接用它等于让公网直连者任意伪造审计 IP。
+func trustedClientIP(r *http.Request) string {
+	if isTrustedProxy(r.RemoteAddr) {
+		if real := strings.TrimSpace(audit.ExtractClientIP(r)); real != "" && net.ParseIP(real) != nil {
+			return real
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // getBaseURL 返回 scheme://host（不含路径），供拼接租户 Issuer 使用；

@@ -121,6 +121,23 @@ func TestVerifyCodeGroupBinding(t *testing.T) {
 	}
 }
 
+// 非数字身份不得核销：userID 会成为 id_token 的 sub，注入载荷
+// 在此就必须被拒，且验证码不被消耗。
+func TestVerifyCodeRejectsNonNumericIdentity(t *testing.T) {
+	m := NewManager()
+	s, err := m.CreateSession("client", "http://localhost/cb", "", "", "111111", 60)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	payload := "\"><img src=x onerror=alert(1)>"
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, payload, "111111"); ok {
+		t.Fatal("injection payload as userID must not verify")
+	}
+	if _, ok := m.VerifyCode("qq", s.VerifyCode, "10001", "111111"); !ok {
+		t.Fatal("code must remain verifiable after a rejected identity")
+	}
+}
+
 // 累计计数回归：CreatedTotal/VerifiedTotal 自启动只增不减，被拒绝的
 // 核销（错误群）不得计入 VerifiedTotal。
 func TestStatsCumulativeCounters(t *testing.T) {

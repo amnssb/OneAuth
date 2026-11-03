@@ -672,6 +672,28 @@ func TestRPInitiatedLogout(t *testing.T) {
 	}
 }
 
+// 汇报里的实测载荷：站点在 login.onyxaxis.org 时，登出跳转到
+// httpbin.org 必须被拒绝（渲染登出页），绝不能 302 外跳。
+func TestLogoutRejectsReportPayload(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := database.InitDB(filepath.Join(tmp, "report-logout.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { database.WriteDB.Close(); database.DB.Close() })
+
+	target := "/logout?post_logout_redirect_uri=" + url.QueryEscape("https://httpbin.org/anything/oa5123test") + "&state=zz"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Host = "login.onyxaxis.org"
+	rec := httptest.NewRecorder()
+	handleRootLogout(rec, req)
+	if rec.Code == http.StatusFound {
+		t.Fatalf("httpbin redirect must not happen, got Location=%s", rec.Header().Get("Location"))
+	}
+	if loc := rec.Header().Get("Location"); strings.Contains(loc, "httpbin.org") {
+		t.Fatalf("response must not point at httpbin.org, got %q", loc)
+	}
+}
+
 // 伪造的 id_token_hint（alg 非 RSA / 验签不过）不得被采信为客户端身份，
 // 否则任何人都能凭一个自签 token 解锁白名单或注销他人 refresh token。
 func TestLogoutRejectsUnverifiedIDTokenHint(t *testing.T) {

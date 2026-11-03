@@ -418,6 +418,14 @@ func SetSetting(key, val string) error {
 // 没有任何口令：命中即视为“未配置”，启动时轮换为随机强密钥。
 var legacyOnebotTokens = map[string]bool{
 	"oneauth_secure_secret_token": true,
+	"demo_secret_888888":          true,
+}
+
+// IsLegacyOnebotToken 判定一个 OneBot 口令是否为历史公开默认值：
+// WS 鉴权层与管理台设置校验都用它做 fail-closed 兜底，即使数据库
+// 里仍存着旧值（例如从旧备份恢复、轮换失败），也不接受它建连。
+func IsLegacyOnebotToken(token string) bool {
+	return legacyOnebotTokens[strings.TrimSpace(token)]
 }
 
 // ensureOnebotToken 保证反向 WS 口令始终是高熵随机值：空值与历史公开
@@ -438,7 +446,8 @@ func ensureOnebotToken() {
 		log.Printf("[OneBot] 写入随机 onebot_token 失败: %v", err)
 		return
 	}
-	log.Printf("[OneBot] onebot_token 为空或为历史公开默认值，已自动生成随机 Token: %s（请同步更新机器人反向 WS 配置）", fresh)
+	// 轮换后的 Token 绝不写入日志：日志常被采集/转发，打印即等于公开。
+	log.Printf("[OneBot] onebot_token 为空或为历史公开默认值，已自动生成随机 Token（请从管理台查看并同步更新机器人反向 WS 配置）")
 }
 
 // SplitURIList 拆逗号分隔的 URI 列表，供回调地址与登出白名单共用。

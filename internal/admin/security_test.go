@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"oneauth/internal/database"
@@ -179,6 +181,163 @@ func TestApplyUpdateRequiresChecksum(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "SHA-256") {
 		t.Fatalf("expected checksum error, got %s", rec.Body.String())
+	}
+}
+
+// tryReserve 必须原子预占：第 max 次预占即锁定，之后的并发预占
+// 一律失败——这是 TOCTOU 修复的核心，bcrypt 之前就要计入名额。
+func TestTryReserveIsAtomic(t *testing.T) {
+	l := newTestLimiter(60*1000, 3, 60*1000)
+	if !l.tryReserve("k") || !l.tryReserve("k") || !l.tryReserve("k") {
+		t.Fatal("first max reservations must succeed")
+	}
+	if l.tryReserve("k") {
+		t.Fatal("reservation past the threshold must fail")
+	}
+	if l.blocked("k") == 0 {
+		t.Fatal("threshold must lock the key")
+	}
+}
+
+// 并发登录不能绕过限流：64 条并发错误口令里最多 max 条拿到 401，
+// 其余必须 429。旧实现先 blocked() 检查、bcrypt 后才记失败，
+// 256 并发能拿到 256 个 401（实测 ~51x）。
+func TestLoginRateLimitConcurrentTOCTOU(t *testing.T) {
+	if _, err := database.InitDB(filepath.Join(t.TempDir(), "toctou.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() {
+		database.WriteDB.Close()
+		database.DB.Close()
+		limiter.mu.Lock()
+		limiter.entries = make(map[string]*loginFails)
+		limiter.mu.Unlock()
+	})
+
+	const n = 64
+	var unauthorized, tooMany atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/api/admin/login",
+				strings.NewReader(`{"username":"toctou-victim","password":"wrong-pass"}`))
+			req.RemoteAddr = "203.0.113.60:1000"
+			rec := httptest.NewRecorder()
+			handleAdminLogin(rec, req)
+			switch rec.Code {
+			case http.StatusUnauthorized:
+				unauthorized.Add(1)
+			case http.StatusTooManyRequests:
+				tooMany.Add(1)
+			default:
+				t.Errorf("unexpected login status %d", rec.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := unauthorized.Load(); got > 5 {
+		t.Fatalf("concurrent failures must be capped at 5 attempts, got %d x 401 of %d", got, n)
+	}
+	if got := tooMany.Load(); got == 0 {
+		t.Fatalf("excess concurrent attempts must be rate-limited, got 0 x 429 of %d", n)
+	}
+}
+
+// 反代后面拿不到转发头时，127.0.0.1 不能当成可区分的限流桶：
+// 所有访客共享它，5 次失败会把全体管理员锁定 15 分钟。
+func TestClientIPInfoSharedLoopbackBucket(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
+	req.RemoteAddr = "127.0.0.1:9000"
+	if _, identifiable := clientIPInfo(req); identifiable {
+		t.Fatal("loopback RemoteAddr without forwarding headers must not be identifiable")
+	}
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+	ip, identifiable := clientIPInfo(req)
+	if !identifiable || ip != "198.51.100.9" {
+		t.Fatalf("forwarded IP behind loopback proxy must be identifiable, got %q identifiable=%v", ip, identifiable)
+	}
+}
+
+// OneBot Token 设置项：空值、历史公开默认值、过短口令一律拒绝。
+func TestOnebotTokenSettingRejectsWeakValues(t *testing.T) {
+	for _, v := range []string{"", "  ", "oneauth_secure_secret_token", "short"} {
+		if err := validateSetting("onebot_token", v); err == nil {
+			t.Fatalf("onebot_token %q must be rejected", v)
+		}
+	}
+	if err := validateSetting("onebot_token", strings.Repeat("x", 32)); err != nil {
+		t.Fatalf("strong token must be accepted: %v", err)
+	}
+}
+
+// 管理会话 Cookie：登录必须下发 HttpOnly Cookie，仅凭 Cookie
+// （不带 Bearer）就能访问管理接口；跨站 Origin 的 Cookie 请求被拒。
+func TestAdminSessionCookieAuth(t *testing.T) {
+	if _, err := database.InitDB(filepath.Join(t.TempDir(), "cookie.db")); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() {
+		database.WriteDB.Close()
+		database.DB.Close()
+		limiter.mu.Lock()
+		limiter.entries = make(map[string]*loginFails)
+		limiter.mu.Unlock()
+		adminStore.mu.Lock()
+		adminStore.sessions = make(map[string]*adminClaims)
+		adminStore.mu.Unlock()
+	})
+
+	// 创建管理员：先走初始化接口。
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/admin/setup",
+		strings.NewReader(`{"username":"cookie-admin","password":"correct-horse-1"}`))
+	setupReq.RemoteAddr = "203.0.113.70:1000"
+	setupRec := httptest.NewRecorder()
+	handleInitialSetup(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup must succeed, got %d: %s", setupRec.Code, setupRec.Body.String())
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/admin/login",
+		strings.NewReader(`{"username":"cookie-admin","password":"correct-horse-1"}`))
+	loginReq.RemoteAddr = "203.0.113.70:1000"
+	loginRec := httptest.NewRecorder()
+	handleAdminLogin(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login must succeed, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var cookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == adminSessionCookie {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("login must set the admin session cookie")
+	}
+	if !cookie.HttpOnly {
+		t.Fatal("admin session cookie must be HttpOnly")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("admin session cookie must be SameSite=Lax, got %v", cookie.SameSite)
+	}
+
+	statsWithCookie := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/stats", nil)
+		req.AddCookie(cookie)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		authMiddleware(handleStats)(rec, req)
+		return rec
+	}
+	if rec := statsWithCookie(""); rec.Code != http.StatusOK {
+		t.Fatalf("cookie-only auth must succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := statsWithCookie("https://evil.example"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-site Origin with cookie must be rejected, got %d", rec.Code)
 	}
 }
 

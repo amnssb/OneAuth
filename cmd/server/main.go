@@ -44,6 +44,7 @@ func main() {
 	}
 
 	port := getEnv("PORT", "9000")
+	demoServerPort = port
 	dbPath := getEnv("DB_PATH", "oneauth.db")
 	keyPath := getEnv("KEY_PATH", "oneauth_rsa.pem")
 
@@ -169,6 +170,13 @@ func main() {
 	mux.HandleFunc("GET /demo", demoGuard(handleDemoPage))
 	mux.HandleFunc("GET /demo/callback", demoGuard(handleDemoCallback))
 
+	// 未配置 WS 来源白名单时提示一次：/ws/onebot 与 OIDC 共用同一
+	// 端口，公网暴露 :9000 时口令是唯一一道关；建议在管理台设置
+	// onebot_ws_ip_allowlist，只放行机器人所在 IP/网段。
+	if strings.TrimSpace(database.GetSetting("onebot_ws_ip_allowlist", "")) == "" {
+		log.Printf("[OneBot] 警告：未配置 onebot_ws_ip_allowlist，/ws/onebot 接受任意来源连接（仅靠 Token 鉴权）；如 :9000 暴露在公网，请设置白名单或仅内网监听")
+	}
+
 	log.Printf("🚀 OneAuth %s (%s) 已启动 → http://0.0.0.0:%s\n", version.Version, version.GitCommit, port)
 	log.Printf("📋 管理后台 → http://localhost:%s/admin\n", port)
 	log.Printf("🔗 统一根 Issuer 发现 → http://localhost:%s/.well-known/openid-configuration\n", port)
@@ -210,15 +218,46 @@ func main() {
 }
 
 // callbackClient 供 demo 回调自调用 /token 使用：复用 TCP 连接，
-// 避免 http.PostForm 默认 Transport 每次新建连接。
+// 避免 http.PostForm 默认 Transport 每次新建连接。Proxy 显式为 nil：
+// 自调用只走回环，绝不经环境代理外发（代理配置里一旦指向外部，
+// 随请求携带的 client_secret 会被送到代理/远端）。
 var callbackClient = &http.Client{
 	Timeout: 15 * time.Second,
 	Transport: &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
+		Proxy:               nil,
 		MaxIdleConns:        64,
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
 	},
+}
+
+// demoServerPort 由 main() 在读取 PORT 后写入，供 demo 回调走回环
+// 自调用 /token 时使用，不再信任请求里的 Host 头。
+var demoServerPort string
+
+// isNumericQQ 判定 sub 是否为合法 QQ 号：5~20 位纯数字。
+func isNumericQQ(s string) bool {
+	if len(s) < 5 || len(s) > 20 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// demoSecurityHeaders 给无脚本的 Demo/首页响应加最严 CSP：页面
+// 只有内联 <style>、没有任何脚本，script-src 'none' 让任何注入
+// 的 <script>/onerror= 都无法执行；frame-ancestors 'none' 防
+// 被嵌进钓鱼页。管理台与登录页另有按渲染哈希计算的 CSP，不走这里。
+func demoSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'self' https: data:; font-src https: data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "no-store")
 }
 
 func getEnv(key, defaultVal string) string {
@@ -242,21 +281,27 @@ const (
 	demoIssuerSlug = "demo-app"
 )
 
-// demoClientSecret 未配置 DEMO_CLIENT_SECRET 时自动生成一次性随机密钥并
-// 打印到启动日志，绝不回退到源码里的默认值 —— 源码公开等于口令公开，任何
-// 人都能拿默认密钥冒充 Demo 客户端走 /token。
+// demoClientSecret 未配置 DEMO_CLIENT_SECRET 时自动生成一次性随机密钥，
+// 绝不回退到源码里的默认值 —— 源码公开等于口令公开，任何人都能拿
+// 默认密钥冒充 Demo 客户端走 /token。密钥值本身绝不写入日志。
 var demoClientSecret = resolveDemoClientSecret()
 
 func resolveDemoClientSecret() string {
 	if v := strings.TrimSpace(os.Getenv("DEMO_CLIENT_SECRET")); v != "" {
-		return v
+		// 历史公开默认值或过短口令视为未配置：生成随机密钥替代，
+		// 避免部署方误把弱口令当成“已固定”长期使用。
+		if v == "demo_secret_888888" || len(v) < 16 {
+			log.Printf("[demo] DEMO_CLIENT_SECRET 为历史公开默认值或过短，已忽略并生成临时随机密钥（请用至少 16 字符的随机值固定）")
+		} else {
+			return v
+		}
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		log.Fatalf("[demo] 生成随机 DEMO_CLIENT_SECRET 失败: %v", err)
 	}
 	s := base64.RawURLEncoding.EncodeToString(b)
-	log.Printf("[demo] 未设置 DEMO_CLIENT_SECRET，已生成临时随机密钥: %s（请用环境变量固定，重启后会更换）", s)
+	log.Printf("[demo] 未设置有效的 DEMO_CLIENT_SECRET，已生成临时随机密钥（请用环境变量固定，重启后会更换）")
 	return s
 }
 
@@ -286,6 +331,7 @@ func handleHomePage(w http.ResponseWriter, r *http.Request) {
         </a>`
 	}
 
+	demoSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -482,6 +528,7 @@ func handleDemoPage(w http.ResponseWriter, r *http.Request) {
 		"&redirect_uri=" + url.QueryEscape(callback) +
 		"&response_type=code&scope=openid+profile+email"
 
+	demoSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -597,23 +644,25 @@ func handleDemoPage(w http.ResponseWriter, r *http.Request) {
 
 func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	if code == "" {
+	if code == "" || len(code) > 256 {
 		http.Error(w, "缺少 code 授权码", http.StatusBadRequest)
 		return
 	}
 
-	// 后端向 /token 换取 Token
+	// 后端向 /token 换取 Token。换取地址固定走回环，绝不用请求
+	// 里的 Host 头拼：Host 完全由请求方控制，用它拼地址等于把
+	// 随请求携带的 client_secret POST 到攻击者指定的主机。
+	port := demoServerPort
+	if port == "" {
+		port = "9000"
+	}
+	tokenURL := fmt.Sprintf("http://127.0.0.1:%s/%s/token", port, demoIssuerSlug)
+
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", code)
 	tokenForm.Set("client_id", demoClientID)
 	tokenForm.Set("client_secret", demoClientSecret)
-
-	host := r.Host
-	if host == "" {
-		host = "localhost:9000"
-	}
-	tokenURL := fmt.Sprintf("%s://%s/%s/token", currentScheme(r), host, demoIssuerSlug)
 
 	resp, err := callbackClient.PostForm(tokenURL, tokenForm)
 	if err != nil {
@@ -636,6 +685,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 		if errCode == "" {
 			errCode = fmt.Sprintf("http_%d", resp.StatusCode)
 		}
+		demoSecurityHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -725,6 +775,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if qqNumber == "" {
+		demoSecurityHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
 		html := fmt.Sprintf(`<!DOCTYPE html>
@@ -751,8 +802,20 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	avatarURL := fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", qqNumber)
+	// sub 直接拼进 HTML 曾是反射型 XSS：id_token 的 sub 若含
+	// `"><img ...>` 会原样进入 qq-badge 与头像 URL，与管理台同源
+	// 时可窃取 localStorage 会话。先做纯数字校验（QQ 号只能是
+	// 5~20 位数字），再对输出做 HTML 转义与 URL 编码，两道关。
+	if !isNumericQQ(qqNumber) {
+		demoSecurityHeaders(w)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("身份解析失败：无效的 QQ 用户身份"))
+		return
+	}
+	avatarURL := fmt.Sprintf("https://q1.qlogo.cn/g?b=qq&nk=%s&s=640", url.QueryEscape(qqNumber))
 
+	demoSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -844,7 +907,7 @@ func handleDemoCallback(w http.ResponseWriter, r *http.Request) {
         <a class="btn-again" href="/demo">🔄 重新发起测试</a>
     </div>
 </body>
-</html>`, avatarURL, qqNumber, template.HTMLEscapeString(string(body)))
+</html>`, template.HTMLEscapeString(avatarURL), template.HTMLEscapeString(qqNumber), template.HTMLEscapeString(string(body)))
 
 	_, _ = w.Write([]byte(html))
 }

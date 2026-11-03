@@ -21,10 +21,17 @@ func TestExtractClientIP(t *testing.T) {
 		t.Fatalf("expected 1.1.1.1 from CF-Connecting-IP, got %s", ip)
 	}
 
-	// 3. XFF 逗号分隔首位有效 IP
+	// 3. XFF 取最右侧有效 IP：首位是客户端可伪造的值，反代追加的
+	// 真实对端 IP 在末尾。链 "2.2.2.2, 3.3.3.3" 应取 3.3.3.3。
 	req.Header.Del("CF-Connecting-IP")
-	if ip := ExtractClientIP(req); ip != "2.2.2.2" {
-		t.Fatalf("expected 2.2.2.2 from XFF, got %s", ip)
+	if ip := ExtractClientIP(req); ip != "3.3.3.3" {
+		t.Fatalf("expected 3.3.3.3 from XFF (rightmost), got %s", ip)
+	}
+
+	// 伪造的首位不能偷换 IP：攻击者先写 9.9.9.9，反代追加真实 IP。
+	req.Header.Set("X-Forwarded-For", "9.9.9.9, 4.4.4.4")
+	if ip := ExtractClientIP(req); ip != "4.4.4.4" {
+		t.Fatalf("spoofed first XFF entry must not win, got %s", ip)
 	}
 }
 
